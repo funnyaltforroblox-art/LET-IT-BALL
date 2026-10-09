@@ -5,7 +5,7 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
--- R6 Motor6D Joints
+-- Core R6 Motor6D joints
 local R6_JOINTS = {
 	"RootJoint",
 	"Neck",
@@ -62,13 +62,13 @@ local function extractPoseData(character)
 	return poseData
 end
 
---- Applies saved C0 and Transform continuously to prevent animation resets
+--- Applies saved C0 and Transform continuously on Stepped
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
 
-	-- Stop old loop
+	-- Unbind previous loop if switching poses
 	if activePoseLoop then
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
@@ -76,7 +76,7 @@ local function applyPoseData(character, poseData)
 
 	freezeAnimations(character)
 
-	-- Lock joints every physics frame
+	-- Lock pose every frame
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			if activePoseLoop then
@@ -362,4 +362,4 @@ saveBtn.MouseButton1Click:Connect(function()
 end)
 
 refreshList()
-print("XDM29WIA")
+print("2927ahai9q")
