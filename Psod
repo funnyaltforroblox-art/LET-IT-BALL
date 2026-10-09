@@ -1,0 +1,279 @@
+-- Services
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- Define R6 Motor6D joints
+local R6_JOINTS = {
+	"RootJoint",
+	"Neck",
+	"Right Shoulder",
+	"Left Shoulder",
+	"Right Hip",
+	"Left Hip"
+}
+
+-- Pose Database Structure (Client-sided in-memory storage)
+-- Structure: SavedFolders[folderName][poseName] = { [jointName] = CFrame }
+local SavedFolders = {
+	["Default"] = {}
+}
+
+----------------------------------------------------
+-- POSE SYSTEM FUNCTIONS
+----------------------------------------------------
+
+local function extractPoseData(character)
+	local torso = character:FindFirstChild("Torso")
+	local humanRoot = character:FindFirstChild("HumanoidRootPart")
+	if not torso or not humanRoot then return nil end
+
+	local poseData = {}
+	for _, jointName in ipairs(R6_JOINTS) do
+		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
+		if joint and joint:IsA("Motor6D") then
+			poseData[jointName] = joint.Transform
+		end
+	end
+	return poseData
+end
+
+local function applyPoseData(character, poseData)
+	local torso = character:FindFirstChild("Torso")
+	local humanRoot = character:FindFirstChild("HumanoidRootPart")
+	if not torso or not humanRoot then return end
+
+	for jointName, cf in pairs(poseData) do
+		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
+		if joint and joint:IsA("Motor6D") then
+			joint.Transform = cf
+		end
+	end
+end
+
+----------------------------------------------------
+-- UI CREATION
+----------------------------------------------------
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "R6PoseManagerGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Open/Close Toggle Button (Mobile Friendly)
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Name = "ToggleBtn"
+toggleBtn.Size = UDim2.new(0, 100, 0, 40)
+toggleBtn.Position = UDim2.new(0.02, 0, 0.2, 0)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
+toggleBtn.Text = "Pose UI"
+toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleBtn.TextSize = 16
+toggleBtn.Font = Enum.Font.SourceSansBold
+toggleBtn.Parent = screenGui
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 8)
+toggleCorner.Parent = toggleBtn
+
+-- Main Frame
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 320, 0, 380)
+mainFrame.Position = UDim2.new(0.5, -160, 0.5, -190)
+mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+mainFrame.BorderSizePixel = 0
+mainFrame.Visible = false
+mainFrame.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 10)
+mainCorner.Parent = mainFrame
+
+-- Title
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 35)
+title.BackgroundTransparency = 1
+title.Text = "R6 Pose Manager"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextSize = 18
+title.Font = Enum.Font.SourceSansBold
+title.Parent = mainFrame
+
+-- Input Controls Container
+local inputFrame = Instance.new("Frame")
+inputFrame.Size = UDim2.new(0.9, 0, 0, 110)
+inputFrame.Position = UDim2.new(0.05, 0, 0.1, 0)
+inputFrame.BackgroundTransparency = 1
+inputFrame.Parent = mainFrame
+
+local folderInput = Instance.new("TextBox")
+folderInput.Size = UDim2.new(1, 0, 0, 30)
+folderInput.Position = UDim2.new(0, 0, 0, 0)
+folderInput.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+folderInput.Text = ""
+folderInput.PlaceholderText = "Folder Name (e.g., Default)"
+folderInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+folderInput.Font = Enum.Font.SourceSans
+folderInput.TextSize = 14
+folderInput.Parent = inputFrame
+
+local poseInput = Instance.new("TextBox")
+poseInput.Size = UDim2.new(1, 0, 0, 30)
+poseInput.Position = UDim2.new(0, 0, 0, 35)
+poseInput.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+poseInput.Text = ""
+poseInput.PlaceholderText = "Pose Name"
+poseInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+poseInput.Font = Enum.Font.SourceSans
+poseInput.TextSize = 14
+poseInput.Parent = inputFrame
+
+local saveBtn = Instance.new("TextButton")
+saveBtn.Size = UDim2.new(1, 0, 0, 35)
+saveBtn.Position = UDim2.new(0, 0, 0, 72)
+saveBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 75)
+saveBtn.Text = "Save Current Pose"
+saveBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+saveBtn.Font = Enum.Font.SourceSansBold
+saveBtn.TextSize = 15
+saveBtn.Parent = inputFrame
+
+-- Scrolling Frame for Folder & Pose List
+local scrollList = Instance.new("ScrollingFrame")
+scrollList.Size = UDim2.new(0.9, 0, 0.55, 0)
+scrollList.Position = UDim2.new(0.05, 0, 0.42, 0)
+scrollList.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+scrollList.BorderSizePixel = 0
+scrollList.ScrollBarThickness = 6
+scrollList.Parent = mainFrame
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.Parent = scrollList
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 4)
+
+----------------------------------------------------
+-- UI REFRESH LOGIC
+----------------------------------------------------
+
+local function refreshList()
+	-- Clear list items
+	for _, child in ipairs(scrollList:GetChildren()) do
+		if not child:IsA("UIListLayout") then
+			child:Destroy()
+		end
+	end
+
+	for folderName, poses in pairs(SavedFolders) do
+		-- Folder Label Header
+		local folderHeader = Instance.new("TextLabel")
+		folderHeader.Size = UDim2.new(1, -8, 0, 25)
+		folderHeader.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+		folderHeader.Text = " 📁 " .. folderName
+		folderHeader.TextColor3 = Color3.fromRGB(255, 215, 0)
+		folderHeader.TextXAlignment = Enum.TextXAlignment.Left
+		folderHeader.Font = Enum.Font.SourceSansBold
+		folderHeader.TextSize = 14
+		folderHeader.Parent = scrollList
+
+		-- Render Poses in Folder
+		for poseName, cfData in pairs(poses) do
+			local poseItem = Instance.new("Frame")
+			poseItem.Size = UDim2.new(1, -8, 0, 30)
+			poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
+			poseItem.Parent = scrollList
+
+			local poseNameLabel = Instance.new("TextLabel")
+			poseNameLabel.Size = UDim2.new(0.5, 0, 1, 0)
+			poseNameLabel.BackgroundTransparency = 1
+			poseNameLabel.Text = "   " .. poseName
+			poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+			poseNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+			poseNameLabel.Font = Enum.Font.SourceSans
+			poseNameLabel.TextSize = 13
+			poseNameLabel.Parent = poseItem
+
+			-- Load Button
+			local loadBtn = Instance.new("TextButton")
+			loadBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
+			loadBtn.Position = UDim2.new(0.52, 0, 0.1, 0)
+			loadBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
+			loadBtn.Text = "Load"
+			loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			loadBtn.Font = Enum.Font.SourceSansBold
+			loadBtn.TextSize = 12
+			loadBtn.Parent = poseItem
+
+			local btnCorner1 = Instance.new("UICorner")
+			btnCorner1.CornerRadius = UDim.new(0, 4)
+			btnCorner1.Parent = loadBtn
+
+			loadBtn.MouseButton1Click:Connect(function()
+				if LocalPlayer.Character then
+					applyPoseData(LocalPlayer.Character, cfData)
+				end
+			end)
+
+			-- Export Button (Prints Lua Code to Output)
+			local exportBtn = Instance.new("TextButton")
+			exportBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
+			exportBtn.Position = UDim2.new(0.76, 0, 0.1, 0)
+			exportBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
+			exportBtn.Text = "Export"
+			exportBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			exportBtn.Font = Enum.Font.SourceSansBold
+			exportBtn.TextSize = 12
+			exportBtn.Parent = poseItem
+
+			local btnCorner2 = Instance.new("UICorner")
+			btnCorner2.CornerRadius = UDim.new(0, 4)
+			btnCorner2.Parent = exportBtn
+
+			exportBtn.MouseButton1Click:Connect(function()
+				print("\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---")
+				print("local " .. poseName .. " = {")
+				for joint, cf in pairs(cfData) do
+					local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
+					print(string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22))
+				end
+				print("}\n--------------------------")
+			end)
+		end
+	end
+
+	-- Update Canvas Height
+	scrollList.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 10)
+end
+
+----------------------------------------------------
+-- BUTTON HANDLERS
+----------------------------------------------------
+
+-- Toggle GUI Visibility
+toggleBtn.MouseButton1Click:Connect(function()
+	mainFrame.Visible = not mainFrame.Visible
+end)
+
+-- Save Pose Handler
+saveBtn.MouseButton1Click:Connect(function()
+	local folderName = folderInput.Text ~= "" and folderInput.Text or "Default"
+	local poseName = poseInput.Text ~= "" and poseInput.Text or ("Pose_" .. tostring(tick()):sub(5, 8))
+
+	local char = LocalPlayer.Character
+	if not char then return end
+
+	local poseData = extractPoseData(char)
+	if poseData then
+		if not SavedFolders[folderName] then
+			SavedFolders[folderName] = {}
+		end
+		SavedFolders[folderName][poseName] = poseData
+
+		poseInput.Text = ""
+		refreshList()
+	end
+end)
+
+-- Initial Load
+refreshList()
+print("DID IT WORK?")
