@@ -5,7 +5,7 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
--- R6 Motor6D joints
+-- Core R6 Motor6D joints
 local R6_JOINTS = {
 	"RootJoint",
 	"Neck",
@@ -15,12 +15,12 @@ local R6_JOINTS = {
 	"Left Hip"
 }
 
--- Pose Storage (Client-sided)
+-- Pose Database
 local SavedFolders = {
 	["Default"] = {}
 }
 
-local activePoseConnection = nil
+local activePoseLoop = nil
 
 ----------------------------------------------------
 -- POSE & ANIMATION HELPER FUNCTIONS
@@ -43,7 +43,7 @@ local function freezeAnimations(character)
 	end
 end
 
---- Stores default C0 and current Transform separately to maintain exact joint anchors
+--- Extracts joint relative orientation
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
@@ -53,52 +53,48 @@ local function extractPoseData(character)
 	for _, jointName in ipairs(R6_JOINTS) do
 		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 		if joint and joint:IsA("Motor6D") then
-			poseData[jointName] = {
-				Transform = joint.Transform,
-				C0 = joint.C0
-			}
+			-- Capture current transform offset
+			poseData[jointName] = joint.Transform
 		end
 	end
 	return poseData
 end
 
---- Freezes default animations and continuously enforces Transform on Stepped
+--- Applies saved relative transforms continuously on PreRender
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
 
-	-- Clean up previous enforcement loop
-	if activePoseConnection then
-		activePoseConnection:Disconnect()
-		activePoseConnection = nil
+	-- Unbind previous loop if switching poses
+	if activePoseLoop then
+		activePoseLoop:Disconnect()
+		activePoseLoop = nil
 	end
 
 	freezeAnimations(character)
 
-	-- Lock pose on Stepped (before frame renders/physics evaluation)
-	activePoseConnection = RunService.Stepped:Connect(function()
+	-- PreRender guarantees setting Transform right before geometry updates
+	activePoseLoop = RunService.PreRender:Connect(function()
 		if not character or not character.Parent then
-			if activePoseConnection then
-				activePoseConnection:Disconnect()
-				activePoseConnection = nil
+			if activePoseLoop then
+				activePoseLoop:Disconnect()
+				activePoseLoop = nil
 			end
 			return
 		end
 
-		for jointName, data in pairs(poseData) do
+		for jointName, transformCF in pairs(poseData) do
 			local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 			if joint and joint:IsA("Motor6D") then
-				-- Enforce initial C0 if modified, and keep Transform locked
-				joint.C0 = data.C0
-				joint.Transform = data.Transform
+				joint.Transform = transformCF
 			end
 		end
 	end)
 end
 
 ----------------------------------------------------
--- DRAGGABLE GUI HELPER
+-- DRAGGABLE GUI HELPER (Touch & Mouse Support)
 ----------------------------------------------------
 
 local function makeDraggable(frame, dragHandle)
@@ -180,7 +176,7 @@ local mainCorner = Instance.new("UICorner")
 mainCorner.CornerRadius = UDim.new(0, 10)
 mainCorner.Parent = mainFrame
 
--- Title
+-- Title Header
 local title = Instance.new("TextLabel")
 title.Name = "Header"
 title.Size = UDim2.new(1, 0, 0, 35)
@@ -321,8 +317,8 @@ local function refreshList()
 			exportBtn.MouseButton1Click:Connect(function()
 				print("\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---")
 				print("local " .. poseName .. " = {")
-				for joint, data in pairs(cfData) do
-					local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = data.Transform:GetComponents()
+				for joint, cf in pairs(cfData) do
+					local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
 					print(string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22))
 				end
 				print("}\n--------------------------")
@@ -361,4 +357,4 @@ saveBtn.MouseButton1Click:Connect(function()
 end)
 
 refreshList()
-print("debggu")
+print"(XDM39")
