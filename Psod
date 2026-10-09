@@ -1,5 +1,6 @@
 -- Services
 local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 
 -- Define R6 Motor6D joints
@@ -12,16 +13,36 @@ local R6_JOINTS = {
 	"Left Hip"
 }
 
--- Pose Database Structure (Client-sided in-memory storage)
--- Structure: SavedFolders[folderName][poseName] = { [jointName] = CFrame }
+-- Pose Storage (Client-sided)
 local SavedFolders = {
 	["Default"] = {}
 }
 
 ----------------------------------------------------
--- POSE SYSTEM FUNCTIONS
+-- POSE & ANIMATION HELPER FUNCTIONS
 ----------------------------------------------------
 
+--- Stops/Freezes all active playing animations on the character's Humanoid/Animator
+local function freezeAnimations(character)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid
+	if animator then
+		local playingTracks = animator:GetPlayingAnimationTracks()
+		for _, track in ipairs(playingTracks) do
+			track:Stop(0) -- Stop instantly with 0 fade time
+		end
+	end
+
+	-- Disable Animate script if present to prevent default animations from restarting
+	local animateScript = character:FindFirstChild("Animate")
+	if animateScript and animateScript:IsA("LocalScript") then
+		animateScript.Disabled = true
+	end
+end
+
+--- Extracts active Transform CFrame from R6 character joints
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
@@ -37,17 +58,64 @@ local function extractPoseData(character)
 	return poseData
 end
 
+--- Freezes default character animations, then applies the pose data
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
 
+	-- Stop playing animations that overwrite Motor6D.Transform
+	freezeAnimations(character)
+
+	-- Apply pose transform to each Motor6D joint
 	for jointName, cf in pairs(poseData) do
 		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 		if joint and joint:IsA("Motor6D") then
 			joint.Transform = cf
 		end
 	end
+end
+
+----------------------------------------------------
+-- DRAGGABLE GUI HELPER (Touch & Mouse Support)
+----------------------------------------------------
+
+local function makeDraggable(frame, dragHandle)
+	dragHandle = dragHandle or frame
+	local dragging = false
+	local dragInput, dragStart, startPos
+
+	dragHandle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = frame.Position
+
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	dragHandle.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if input == dragInput and dragging then
+			local delta = input.Position - dragStart
+			frame.Position = UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
+			)
+		end
+	end)
 end
 
 ----------------------------------------------------
@@ -59,7 +127,7 @@ screenGui.Name = "R6PoseManagerGui"
 screenGui.ResetOnSpawn = false
 screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
--- Open/Close Toggle Button (Mobile Friendly)
+-- Open/Close Toggle Button
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Name = "ToggleBtn"
 toggleBtn.Size = UDim2.new(0, 100, 0, 40)
@@ -75,6 +143,9 @@ local toggleCorner = Instance.new("UICorner")
 toggleCorner.CornerRadius = UDim.new(0, 8)
 toggleCorner.Parent = toggleBtn
 
+-- Make Toggle Button Draggable
+makeDraggable(toggleBtn)
+
 -- Main Frame
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
@@ -89,15 +160,19 @@ local mainCorner = Instance.new("UICorner")
 mainCorner.CornerRadius = UDim.new(0, 10)
 mainCorner.Parent = mainFrame
 
--- Title
+-- Title / Header (Used as Drag Handle)
 local title = Instance.new("TextLabel")
+title.Name = "Header"
 title.Size = UDim2.new(1, 0, 0, 35)
 title.BackgroundTransparency = 1
-title.Text = "R6 Pose Manager"
+title.Text = "R6 Pose Manager (Drag Here)"
 title.TextColor3 = Color3.fromRGB(255, 255, 255)
-title.TextSize = 18
+title.TextSize = 16
 title.Font = Enum.Font.SourceSansBold
 title.Parent = mainFrame
+
+-- Make Main Frame Draggable by clicking/touching the Title Bar or Background
+makeDraggable(mainFrame, title)
 
 -- Input Controls Container
 local inputFrame = Instance.new("Frame")
@@ -157,7 +232,6 @@ listLayout.Padding = UDim.new(0, 4)
 ----------------------------------------------------
 
 local function refreshList()
-	-- Clear list items
 	for _, child in ipairs(scrollList:GetChildren()) do
 		if not child:IsA("UIListLayout") then
 			child:Destroy()
@@ -214,7 +288,7 @@ local function refreshList()
 				end
 			end)
 
-			-- Export Button (Prints Lua Code to Output)
+			-- Export Button
 			local exportBtn = Instance.new("TextButton")
 			exportBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
 			exportBtn.Position = UDim2.new(0.76, 0, 0.1, 0)
@@ -241,7 +315,6 @@ local function refreshList()
 		end
 	end
 
-	-- Update Canvas Height
 	scrollList.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 10)
 end
 
@@ -249,12 +322,10 @@ end
 -- BUTTON HANDLERS
 ----------------------------------------------------
 
--- Toggle GUI Visibility
 toggleBtn.MouseButton1Click:Connect(function()
 	mainFrame.Visible = not mainFrame.Visible
 end)
 
--- Save Pose Handler
 saveBtn.MouseButton1Click:Connect(function()
 	local folderName = folderInput.Text ~= "" and folderInput.Text or "Default"
 	local poseName = poseInput.Text ~= "" and poseInput.Text or ("Pose_" .. tostring(tick()):sub(5, 8))
@@ -274,6 +345,5 @@ saveBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
--- Initial Load
 refreshList()
-print("DID IT WORK?")
+print("Debug")
