@@ -5,24 +5,14 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
--- Core R6 Motor6D joints
-local R6_JOINTS = {
-	"RootJoint",
-	"Neck",
-	"Right Shoulder",
-	"Left Shoulder",
-	"Right Hip",
-	"Left Hip"
-}
-
--- Default R6 Joint C0 offsets (Used to isolate pure manual pose offsets)
-local DEFAULT_C0 = {
-	["RootJoint"] = CFrame.new(0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 1, -0),
-	["Neck"] = CFrame.new(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 1, -0),
-	["Right Shoulder"] = CFrame.new(1, 0.5, 0, 0, 0, 1, 0, 1, -0, -1, 0, 0),
-	["Left Shoulder"] = CFrame.new(-1, 0.5, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0),
-	["Right Hip"] = CFrame.new(1, -1, 0, 0, 0, 1, 0, 1, -0, -1, 0, 0),
-	["Left Hip"] = CFrame.new(-1, -1, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+-- Map R6 Body Parts to their controlling Motor6D joint name
+local R6_LIMB_MAP = {
+	["Head"] = "Neck",
+	["Right Arm"] = "Right Shoulder",
+	["Left Arm"] = "Left Shoulder",
+	["Right Leg"] = "Right Hip",
+	["Left Leg"] = "Left Hip",
+	["HumanoidRootPart"] = "RootJoint"
 }
 
 -- Pose Database
@@ -53,32 +43,39 @@ local function freezeAnimations(character)
 	end
 end
 
---- Extract full relative joint offset combining modified C0 and Transform
+--- Captures exact World-Space alignment relative to the Torso
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
-	local humanRoot = character:FindFirstChild("HumanoidRootPart")
-	if not torso or not humanRoot then return nil end
+	if not torso then return nil end
 
 	local poseData = {}
-	for _, jointName in ipairs(R6_JOINTS) do
-		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
-		if joint and joint:IsA("Motor6D") then
-			local defaultC0 = DEFAULT_C0[jointName] or CFrame.identity
-			-- Combine C0 change + Transform change relative to original joint C0
-			local poseOffset = defaultC0:Inverse() * joint.C0 * joint.Transform
-			poseData[jointName] = poseOffset
+
+	for limbName, jointName in pairs(R6_LIMB_MAP) do
+		local limb = character:FindFirstChild(limbName)
+		local parentPart = (limbName == "HumanoidRootPart") and character:FindFirstChild("HumanoidRootPart") or torso
+		local joint = parentPart and (parentPart:FindFirstChild(jointName) or torso:FindFirstChild(jointName))
+
+		if limb and joint and joint:IsA("Motor6D") then
+			-- Get relative CFrame of limb in torso's local space
+			local relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
+			
+			-- Solve for the Motor6D.Transform required to achieve this position:
+			-- Limb.CFrame = Part0.CFrame * C0 * Transform * C1:Inverse()
+			local targetTransform = joint.C0:Inverse() * relativeCFrame * joint.C1
+			poseData[jointName] = targetTransform
 		end
 	end
+
 	return poseData
 end
 
---- Apply saved relative offset continuously on Stepped
+--- Enforces solved Transform offsets on Stepped
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
 
-	-- Unbind previous loop if switching poses
+	-- Unbind previous enforcement loop
 	if activePoseLoop then
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
@@ -86,7 +83,7 @@ local function applyPoseData(character, poseData)
 
 	freezeAnimations(character)
 
-	-- Lock pose on Stepped (runs right before physics and rendering)
+	-- Apply every Stepped frame right before physics/render steps
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			if activePoseLoop then
@@ -96,10 +93,10 @@ local function applyPoseData(character, poseData)
 			return
 		end
 
-		for jointName, poseCF in pairs(poseData) do
+		for jointName, transformCF in pairs(poseData) do
 			local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 			if joint and joint:IsA("Motor6D") then
-				joint.Transform = poseCF
+				joint.Transform = transformCF
 			end
 		end
 	end)
@@ -369,4 +366,4 @@ saveBtn.MouseButton1Click:Connect(function()
 end)
 
 refreshList()
-print("itcanwait")
+print("2iw8sh")
