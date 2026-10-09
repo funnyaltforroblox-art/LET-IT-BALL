@@ -5,14 +5,14 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
--- Map R6 Body Parts to their controlling Motor6D joint name
-local R6_LIMB_MAP = {
-	["Head"] = "Neck",
-	["Right Arm"] = "Right Shoulder",
-	["Left Arm"] = "Left Shoulder",
-	["Right Leg"] = "Right Hip",
-	["Left Leg"] = "Left Hip",
-	["HumanoidRootPart"] = "RootJoint"
+-- R6 Motor6D Joints
+local R6_JOINTS = {
+	"RootJoint",
+	"Neck",
+	"Right Shoulder",
+	"Left Shoulder",
+	"Right Hip",
+	"Left Hip"
 }
 
 -- Pose Database
@@ -43,39 +43,32 @@ local function freezeAnimations(character)
 	end
 end
 
---- Captures exact World-Space alignment relative to the Torso
+--- Captures exact C0 AND Transform properties from Motor6D joints
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
-	if not torso then return nil end
+	local humanRoot = character:FindFirstChild("HumanoidRootPart")
+	if not torso or not humanRoot then return nil end
 
 	local poseData = {}
-
-	for limbName, jointName in pairs(R6_LIMB_MAP) do
-		local limb = character:FindFirstChild(limbName)
-		local parentPart = (limbName == "HumanoidRootPart") and character:FindFirstChild("HumanoidRootPart") or torso
-		local joint = parentPart and (parentPart:FindFirstChild(jointName) or torso:FindFirstChild(jointName))
-
-		if limb and joint and joint:IsA("Motor6D") then
-			-- Get relative CFrame of limb in torso's local space
-			local relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
-			
-			-- Solve for the Motor6D.Transform required to achieve this position:
-			-- Limb.CFrame = Part0.CFrame * C0 * Transform * C1:Inverse()
-			local targetTransform = joint.C0:Inverse() * relativeCFrame * joint.C1
-			poseData[jointName] = targetTransform
+	for _, jointName in ipairs(R6_JOINTS) do
+		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
+		if joint and joint:IsA("Motor6D") then
+			poseData[jointName] = {
+				C0 = joint.C0,
+				Transform = joint.Transform
+			}
 		end
 	end
-
 	return poseData
 end
 
---- Enforces solved Transform offsets on Stepped
+--- Applies saved C0 and Transform continuously to prevent animation resets
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
 
-	-- Unbind previous enforcement loop
+	-- Stop old loop
 	if activePoseLoop then
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
@@ -83,7 +76,7 @@ local function applyPoseData(character, poseData)
 
 	freezeAnimations(character)
 
-	-- Apply every Stepped frame right before physics/render steps
+	-- Lock joints every physics frame
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			if activePoseLoop then
@@ -93,10 +86,11 @@ local function applyPoseData(character, poseData)
 			return
 		end
 
-		for jointName, transformCF in pairs(poseData) do
+		for jointName, data in pairs(poseData) do
 			local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 			if joint and joint:IsA("Motor6D") then
-				joint.Transform = transformCF
+				joint.C0 = data.C0
+				joint.Transform = data.Transform
 			end
 		end
 	end)
@@ -326,9 +320,11 @@ local function refreshList()
 			exportBtn.MouseButton1Click:Connect(function()
 				print("\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---")
 				print("local " .. poseName .. " = {")
-				for joint, cf in pairs(cfData) do
-					local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
-					print(string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22))
+				for joint, data in pairs(cfData) do
+					local x0, y0, z0, r00, r01, r02, r10, r11, r12, r20, r21, r22 = data.C0:GetComponents()
+					local xT, yT, zT, t00, t01, t02, t10, t11, t12, t20, t21, t22 = data.Transform:GetComponents()
+					print(string.format('    ["%s"] = { C0 = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f), Transform = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f) },', 
+						joint, x0, y0, z0, r00, r01, r02, r10, r11, r12, r20, r21, r22, xT, yT, zT, t00, t01, t02, t10, t11, t12, t20, t21, t22))
 				end
 				print("}\n--------------------------")
 			end)
@@ -366,4 +362,4 @@ saveBtn.MouseButton1Click:Connect(function()
 end)
 
 refreshList()
-print("2iw8sh")
+print("XDM29WIA")
