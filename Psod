@@ -5,14 +5,14 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
--- Core R6 Motor6D joints
-local R6_JOINTS = {
-	"RootJoint",
-	"Neck",
-	"Right Shoulder",
-	"Left Shoulder",
-	"Right Hip",
-	"Left Hip"
+-- R6 Limb to Joint mappings
+local R6_LIMB_MAP = {
+	["Head"] = "Neck",
+	["Right Arm"] = "Right Shoulder",
+	["Left Arm"] = "Left Shoulder",
+	["Right Leg"] = "Right Hip",
+	["Left Leg"] = "Left Hip",
+	["HumanoidRootPart"] = "RootJoint"
 }
 
 -- Pose Database
@@ -43,30 +43,37 @@ local function freezeAnimations(character)
 	end
 end
 
---- Extracts joint relative orientation
+--- Calculates exact relative offset for each limb part
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
-	local humanRoot = character:FindFirstChild("HumanoidRootPart")
-	if not torso or not humanRoot then return nil end
+	if not torso then return nil end
 
 	local poseData = {}
-	for _, jointName in ipairs(R6_JOINTS) do
-		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
-		if joint and joint:IsA("Motor6D") then
-			-- Capture current transform offset
-			poseData[jointName] = joint.Transform
+
+	for limbName, jointName in pairs(R6_LIMB_MAP) do
+		local limb = character:FindFirstChild(limbName)
+		local parentPart = (limbName == "HumanoidRootPart") and character:FindFirstChild("HumanoidRootPart") or torso
+		local joint = parentPart and (parentPart:FindFirstChild(jointName) or torso:FindFirstChild(jointName))
+
+		if limb and joint and joint:IsA("Motor6D") then
+			-- Relative CFrame relative to Torso
+			local relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
+			
+			-- Solve for exact Transform offset required:
+			local targetTransform = joint.C0:Inverse() * relativeCFrame * joint.C1
+			poseData[jointName] = targetTransform
 		end
 	end
+
 	return poseData
 end
 
---- Applies saved relative transforms continuously on PreRender
+--- Applies solved Transform offsets continuously using Stepped
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
 
-	-- Unbind previous loop if switching poses
 	if activePoseLoop then
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
@@ -74,8 +81,8 @@ local function applyPoseData(character, poseData)
 
 	freezeAnimations(character)
 
-	-- PreRender guarantees setting Transform right before geometry updates
-	activePoseLoop = RunService.PreRender:Connect(function()
+	-- Stepped runs right before physics simulation
+	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			if activePoseLoop then
 				activePoseLoop:Disconnect()
@@ -94,7 +101,7 @@ local function applyPoseData(character, poseData)
 end
 
 ----------------------------------------------------
--- DRAGGABLE GUI HELPER (Touch & Mouse Support)
+-- DRAGGABLE GUI HELPER (Touch & Mouse)
 ----------------------------------------------------
 
 local function makeDraggable(frame, dragHandle)
@@ -357,4 +364,4 @@ saveBtn.MouseButton1Click:Connect(function()
 end)
 
 refreshList()
-print"(XDM39")
+print("upsa")
