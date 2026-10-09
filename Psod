@@ -1,7 +1,6 @@
 -- Services
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -15,13 +14,10 @@ local R6_JOINTS = {
 	"Left Hip"
 }
 
--- Pose Storage
+-- Pose Storage (Client-sided)
 local SavedFolders = {
 	["Default"] = {}
 }
-
-local activePoseLoop = nil
-local currentActivePose = nil
 
 ----------------------------------------------------
 -- POSE & ANIMATION HELPER FUNCTIONS
@@ -44,6 +40,7 @@ local function freezeAnimations(character)
 	end
 end
 
+--- Captures Motor6D.C0 (where manual posing stores offsets)
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
@@ -53,41 +50,27 @@ local function extractPoseData(character)
 	for _, jointName in ipairs(R6_JOINTS) do
 		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 		if joint and joint:IsA("Motor6D") then
-			poseData[jointName] = joint.Transform
+			poseData[jointName] = joint.C0
 		end
 	end
 	return poseData
 end
 
---- Freezes animations and binds pose enforcement to RunService.Stepped
+--- Applies saved C0 values directly to character joints
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
 
-	-- Unbind previous loop if switching poses
-	if activePoseLoop then
-		activePoseLoop:Disconnect()
-		activePoseLoop = nil
-	end
-
 	freezeAnimations(character)
-	currentActivePose = poseData
 
-	-- Run on Stepped (right before physics engine updates Motor6D transforms)
-	activePoseLoop = RunService.Stepped:Connect(function()
-		if not character or not character.Parent then
-			if activePoseLoop then activePoseLoop:Disconnect() end
-			return
+	for jointName, savedC0 in pairs(poseData) do
+		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
+		if joint and joint:IsA("Motor6D") then
+			joint.C0 = savedC0
+			joint.Transform = CFrame.identity -- Clear any residual animation transform
 		end
-
-		for jointName, cf in pairs(currentActivePose) do
-			local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
-			if joint and joint:IsA("Motor6D") then
-				joint.Transform = cf
-			end
-		end
-	end)
+	end
 end
 
 ----------------------------------------------------
@@ -327,7 +310,7 @@ local function refreshList()
 end
 
 ----------------------------------------------------
--- BUTTON HANDLERS & RESET
+-- BUTTON HANDLERS
 ----------------------------------------------------
 
 toggleBtn.MouseButton1Click:Connect(function()
@@ -352,14 +335,5 @@ saveBtn.MouseButton1Click:Connect(function()
 		refreshList()
 	end
 end)
-
--- Reset pose connection if player character respawns
-LocalPlayer.CharacterAdded:Connect(function()
-	if activePoseLoop then
-		activePoseLoop:Disconnect()
-		activePoseLoop = nil
-	end
-end)
-
+print("delarp")
 refreshList()
-print("degbug01")
