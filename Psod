@@ -27,7 +27,7 @@ local SavedFolders = {
 local CollapsedFolders = {}
 
 local activePoseLoop = nil
-local currentLoadedPoseIdentifier = nil -- Tracks currently active pose for toggle-off functionality
+local currentLoadedPoseIdentifier = nil 
 
 ----------------------------------------------------
 -- FILE SYSTEM (DELTA WORKSPACE STORAGE)
@@ -57,7 +57,8 @@ local function savePosesToFile()
 			for poseName, poseData in pairs(poses) do
 				serializableData[folderName][poseName] = {
 					Joints = {},
-					Exclusions = poseData.Exclusions or {}
+					Exclusions = poseData.Exclusions or {},
+					Trigger = poseData.Trigger or { Enabled = false, MinHP = 0, MaxHP = 100 }
 				}
 				for jointName, cf in pairs(poseData.Joints) do
 					serializableData[folderName][poseName].Joints[jointName] = serializeCFrame(cf)
@@ -82,11 +83,12 @@ local function loadPosesFromFile()
 				for poseName, poseData in pairs(poses) do
 					SavedFolders[folderName][poseName] = {
 						Joints = {},
-						Exclusions = poseData.Exclusions or {}
+						Exclusions = poseData.Exclusions or {},
+						Trigger = poseData.Trigger or { Enabled = false, MinHP = 0, MaxHP = 100 }
 					}
 					local rawJoints = poseData.Joints or poseData
 					for jointName, cfTbl in pairs(rawJoints) do
-						if jointName ~= "Exclusions" then
+						if jointName ~= "Exclusions" and jointName ~= "Trigger" then
 							SavedFolders[folderName][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
 						end
 					end
@@ -107,7 +109,6 @@ local function unloadPose(character)
 	end
 	currentLoadedPoseIdentifier = nil
 
-	-- Re-enable standard animate script
 	local animateScript = character:FindFirstChild("Animate")
 	if animateScript and animateScript:IsA("LocalScript") then
 		animateScript.Disabled = false
@@ -142,19 +143,31 @@ local function extractPoseData(character)
 
 	return {
 		Joints = joints,
-		Exclusions = {}
+		Exclusions = {},
+		Trigger = { Enabled = false, MinHP = 0, MaxHP = 100 }
 	}
 end
 
 local function applyPoseData(character, poseEntry, poseIdentifier)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
-	if not torso or not humanRoot then return end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not torso or not humanRoot or not humanoid then return end
 
 	-- Toggle off if clicking load on the already active pose
 	if currentLoadedPoseIdentifier == poseIdentifier then
 		unloadPose(character)
 		return
+	end
+
+	-- Check HP Trigger Conditions before applying
+	local trigger = poseEntry.Trigger
+	if trigger and trigger.Enabled then
+		local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
+		if hpPercent < trigger.MinHP then
+			print("Pose trigger blocked: Health (" .. math.floor(hpPercent) .. "%) is below MinHP (" .. trigger.MinHP .. "%)")
+			return
+		end
 	end
 
 	if activePoseLoop then
@@ -170,9 +183,18 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 	freezeAnimations(character, exclusions)
 
 	activePoseLoop = RunService.Stepped:Connect(function()
-		if not character or not character.Parent then
+		if not character or not character.Parent or not humanoid or humanoid.Health <= 0 then
 			unloadPose(character)
 			return
+		end
+
+		-- Check MaxHP condition dynamically during run
+		if trigger and trigger.Enabled then
+			local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
+			if hpPercent < trigger.MaxHP then
+				unloadPose(character)
+				return
+			end
 		end
 
 		for jointName, relativeCFrame in pairs(poseData) do
@@ -258,8 +280,8 @@ makeDraggable(toggleBtn)
 -- Main Frame
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
-mainFrame.Size = UDim2.new(0, 320, 0, 380)
-mainFrame.Position = UDim2.new(0.5, -160, 0.5, -190)
+mainFrame.Size = UDim2.new(0, 320, 0, 420)
+mainFrame.Position = UDim2.new(0.5, -160, 0.5, -210)
 mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 mainFrame.BorderSizePixel = 0
 mainFrame.Visible = false
@@ -285,7 +307,7 @@ makeDraggable(mainFrame, title)
 -- Input Controls
 local inputFrame = Instance.new("Frame")
 inputFrame.Size = UDim2.new(0.9, 0, 0, 110)
-inputFrame.Position = UDim2.new(0.05, 0, 0.1, 0)
+inputFrame.Position = UDim2.new(0.05, 0, 0.08, 0)
 inputFrame.BackgroundTransparency = 1
 inputFrame.Parent = mainFrame
 
@@ -323,8 +345,8 @@ saveBtn.Parent = inputFrame
 
 -- Scrolling Frame
 local scrollList = Instance.new("ScrollingFrame")
-scrollList.Size = UDim2.new(0.9, 0, 0.55, 0)
-scrollList.Position = UDim2.new(0.05, 0, 0.42, 0)
+scrollList.Size = UDim2.new(0.9, 0, 0.52, 0)
+scrollList.Position = UDim2.new(0.05, 0, 0.38, 0)
 scrollList.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 scrollList.BorderSizePixel = 0
 scrollList.ScrollBarThickness = 6
@@ -351,61 +373,51 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	modal.ZIndex = 10
 	modal.Parent = mainFrame
 
-	local modalBox = Instance.new("Frame")
-	modalBox.Size = UDim2.new(0.85, 0, 0.7, 0)
-	modalBox.Position = UDim2.new(0.075, 0, 0.15, 0)
+	local modalBox = Instance.new("ScrollingFrame")
+	modalBox.Size = UDim2.new(0.9, 0, 0.85, 0)
+	modalBox.Position = UDim2.new(0.05, 0, 0.08, 0)
 	modalBox.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+	modalBox.BorderSizePixel = 0
+	modalBox.ScrollBarThickness = 4
 	modalBox.ZIndex = 11
 	modalBox.Parent = modal
 
-	local modalCorner = Instance.new("UICorner")
-	modalCorner.CornerRadius = UDim.new(0, 8)
-	modalCorner.Parent = modalBox
+	local mLayout = Instance.new("UIListLayout")
+	mLayout.Parent = modalBox
+	mLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	mLayout.Padding = UDim.new(0, 8)
 
 	local modalTitle = Instance.new("TextLabel")
-	modalTitle.Size = UDim2.new(1, 0, 0, 35)
+	modalTitle.Size = UDim2.new(1, 0, 0, 30)
 	modalTitle.BackgroundTransparency = 1
 	modalTitle.Text = "Settings: " .. poseName
 	modalTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 	modalTitle.Font = Enum.Font.SourceSansBold
-	modalTitle.TextSize = 15
+	modalTitle.TextSize = 16
 	modalTitle.ZIndex = 12
 	modalTitle.Parent = modalBox
 
+	-- Section 1: Part Exclusions
 	local desc = Instance.new("TextLabel")
-	desc.Size = UDim2.new(0.9, 0, 0, 30)
-	desc.Position = UDim2.new(0.05, 0, 0.12, 0)
+	desc.Size = UDim2.new(1, 0, 0, 24)
 	desc.BackgroundTransparency = 1
-	desc.Text = "Check parts to EXCLUDE from this pose (allow normal animations):"
+	desc.Text = "Part Exclusions (Allow Normal Animations):"
 	desc.TextColor3 = Color3.fromRGB(180, 180, 180)
-	desc.Font = Enum.Font.SourceSans
-	desc.TextSize = 11
-	desc.TextWrapped = true
+	desc.Font = Enum.Font.SourceSansBold
+	desc.TextSize = 12
+	desc.TextXAlignment = Enum.TextXAlignment.Left
 	desc.ZIndex = 12
 	desc.Parent = modalBox
-
-	local excludeContainer = Instance.new("ScrollingFrame")
-	excludeContainer.Size = UDim2.new(0.9, 0, 0.45, 0)
-	excludeContainer.Position = UDim2.new(0.05, 0, 0.28, 0)
-	excludeContainer.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-	excludeContainer.BorderSizePixel = 0
-	excludeContainer.ZIndex = 12
-	excludeContainer.Parent = modalBox
-
-	local excLayout = Instance.new("UIListLayout")
-	excLayout.Parent = excludeContainer
-	excLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	excLayout.Padding = UDim.new(0, 4)
 
 	poseEntry.Exclusions = poseEntry.Exclusions or {}
 
 	for _, jointName in ipairs({"Neck", "Right Shoulder", "Left Shoulder", "Right Hip", "Left Hip", "RootJoint"}) do
 		local row = Instance.new("TextButton")
-		row.Size = UDim2.new(1, 0, 0, 26)
+		row.Size = UDim2.new(1, 0, 0, 24)
 		row.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
 		row.Text = ""
 		row.ZIndex = 13
-		row.Parent = excludeContainer
+		row.Parent = modalBox
 
 		local label = Instance.new("TextLabel")
 		label.Size = UDim2.new(0.75, 0, 1, 0)
@@ -415,18 +427,18 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 		label.TextColor3 = Color3.fromRGB(220, 220, 220)
 		label.TextXAlignment = Enum.TextXAlignment.Left
 		label.Font = Enum.Font.SourceSans
-		label.TextSize = 13
+		label.TextSize = 12
 		label.ZIndex = 14
 		label.Parent = row
 
 		local check = Instance.new("TextLabel")
-		check.Size = UDim2.new(0, 20, 0, 20)
-		check.Position = UDim2.new(0.85, 0, 0.15, 0)
+		check.Size = UDim2.new(0, 18, 0, 18)
+		check.Position = UDim2.new(0.85, 0, 0.12, 0)
 		check.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
 		check.Text = poseEntry.Exclusions[jointName] and "✓" or ""
 		check.TextColor3 = Color3.fromRGB(0, 255, 100)
 		check.Font = Enum.Font.SourceSansBold
-		check.TextSize = 14
+		check.TextSize = 13
 		check.ZIndex = 14
 		check.Parent = row
 
@@ -437,20 +449,152 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 		end)
 	end
 
+	-- Section 2: HP Triggers
+	local triggerDesc = Instance.new("TextLabel")
+	triggerDesc.Size = UDim2.new(1, 0, 0, 24)
+	triggerDesc.BackgroundTransparency = 1
+	triggerDesc.Text = "HP Trigger Settings:"
+	triggerDesc.TextColor3 = Color3.fromRGB(180, 180, 180)
+	triggerDesc.Font = Enum.Font.SourceSansBold
+	triggerDesc.TextSize = 12
+	triggerDesc.TextXAlignment = Enum.TextXAlignment.Left
+	triggerDesc.ZIndex = 12
+	triggerDesc.Parent = modalBox
+
+	poseEntry.Trigger = poseEntry.Trigger or { Enabled = false, MinHP = 0, MaxHP = 100 }
+
+	-- Enable Trigger Row
+	local trigRow = Instance.new("TextButton")
+	trigRow.Size = UDim2.new(1, 0, 0, 24)
+	trigRow.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+	trigRow.Text = ""
+	trigRow.ZIndex = 13
+	trigRow.Parent = modalBox
+
+	local trigLabel = Instance.new("TextLabel")
+	trigLabel.Size = UDim2.new(0.75, 0, 1, 0)
+	trigLabel.Position = UDim2.new(0.05, 0, 0, 0)
+	trigLabel.BackgroundTransparency = 1
+	trigLabel.Text = "Enable HP Trigger"
+	trigLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+	trigLabel.TextXAlignment = Enum.TextXAlignment.Left
+	trigLabel.Font = Enum.Font.SourceSans
+	trigLabel.TextSize = 12
+	trigLabel.ZIndex = 14
+	trigLabel.Parent = trigRow
+
+	local trigCheck = Instance.new("TextLabel")
+	trigCheck.Size = UDim2.new(0, 18, 0, 18)
+	trigCheck.Position = UDim2.new(0.85, 0, 0.12, 0)
+	trigCheck.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+	trigCheck.Text = poseEntry.Trigger.Enabled and "✓" or ""
+	trigCheck.TextColor3 = Color3.fromRGB(0, 255, 100)
+	trigCheck.Font = Enum.Font.SourceSansBold
+	trigCheck.TextSize = 13
+	trigCheck.ZIndex = 14
+	trigCheck.Parent = trigRow
+
+	trigRow.MouseButton1Click:Connect(function()
+		poseEntry.Trigger.Enabled = not poseEntry.Trigger.Enabled
+		trigCheck.Text = poseEntry.Trigger.Enabled and "✓" or ""
+		savePosesToFile()
+	end)
+
+	-- Min HP Box
+	local minRow = Instance.new("Frame")
+	minRow.Size = UDim2.new(1, 0, 0, 28)
+	minRow.BackgroundTransparency = 1
+	minRow.ZIndex = 13
+	minRow.Parent = modalBox
+
+	local minLbl = Instance.new("TextLabel")
+	minLbl.Size = UDim2.new(0.6, 0, 1, 0)
+	minLbl.Position = UDim2.new(0.05, 0, 0, 0)
+	minLbl.BackgroundTransparency = 1
+	minLbl.Text = "Min HP % (Required to load):"
+	minLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+	minLbl.TextXAlignment = Enum.TextXAlignment.Left
+	minLbl.Font = Enum.Font.SourceSans
+	minLbl.TextSize = 11
+	minLbl.ZIndex = 14
+	minLbl.Parent = minRow
+
+	local minBox = Instance.new("TextBox")
+	minBox.Size = UDim2.new(0.25, 0, 0.9, 0)
+	minBox.Position = UDim2.new(0.68, 0, 0.05, 0)
+	minBox.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+	minBox.Text = tostring(poseEntry.Trigger.MinHP)
+	minBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+	minBox.Font = Enum.Font.SourceSansBold
+	minBox.TextSize = 12
+	minBox.ZIndex = 14
+	minBox.Parent = minRow
+
+	minBox.FocusLost:Connect(function()
+		local val = tonumber(minBox.Text)
+		if val then
+			poseEntry.Trigger.MinHP = math.clamp(val, 0, 100)
+			minBox.Text = tostring(poseEntry.Trigger.MinHP)
+			savePosesToFile()
+		end
+	end)
+
+	-- Max HP Box
+	local maxRow = Instance.new("Frame")
+	maxRow.Size = UDim2.new(1, 0, 0, 28)
+	maxRow.BackgroundTransparency = 1
+	maxRow.ZIndex = 13
+	maxRow.Parent = modalBox
+
+	local maxLbl = Instance.new("TextLabel")
+	maxLbl.Size = UDim2.new(0.6, 0, 1, 0)
+	maxLbl.Position = UDim2.new(0.05, 0, 0, 0)
+	maxLbl.BackgroundTransparency = 1
+	maxLbl.Text = "Max HP % (Unload below):"
+	maxLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+	maxLbl.TextXAlignment = Enum.TextXAlignment.Left
+	maxLbl.Font = Enum.Font.SourceSans
+	maxLbl.TextSize = 11
+	maxLbl.ZIndex = 14
+	maxLbl.Parent = maxRow
+
+	local maxBox = Instance.new("TextBox")
+	maxBox.Size = UDim2.new(0.25, 0, 0.9, 0)
+	maxBox.Position = UDim2.new(0.68, 0, 0.05, 0)
+	maxBox.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+	maxBox.Text = tostring(poseEntry.Trigger.MaxHP)
+	maxBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+	maxBox.Font = Enum.Font.SourceSansBold
+	maxBox.TextSize = 12
+	maxBox.ZIndex = 14
+	maxBox.Parent = maxRow
+
+	maxBox.FocusLost:Connect(function()
+		local val = tonumber(maxBox.Text)
+		if val then
+			poseEntry.Trigger.MaxHP = math.clamp(val, 0, 100)
+			maxBox.Text = tostring(poseEntry.Trigger.MaxHP)
+			savePosesToFile()
+		end
+	end)
+
+	-- Action Buttons Row
+	local btnRow = Instance.new("Frame")
+	btnRow.Size = UDim2.new(1, 0, 0, 36)
+	btnRow.BackgroundTransparency = 1
+	btnRow.ZIndex = 13
+	btnRow.Parent = modalBox
+
 	local deleteBtn = Instance.new("TextButton")
-	deleteBtn.Size = UDim2.new(0.42, 0, 0, 32)
-	deleteBtn.Position = UDim2.new(0.05, 0, 0.8, 0)
+	deleteBtn.Size = UDim2.new(0.45, 0, 1, 0)
+	deleteBtn.Position = UDim2.new(0.02, 0, 0, 0)
 	deleteBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
 	deleteBtn.Text = "Delete Pose"
 	deleteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 	deleteBtn.Font = Enum.Font.SourceSansBold
-	deleteBtn.TextSize = 13
-	deleteBtn.ZIndex = 12
-	deleteBtn.Parent = modalBox
-
-	local delCorner = Instance.new("UICorner")
-	delCorner.CornerRadius = UDim.new(0, 4)
-	delCorner.Parent = deleteBtn
+	deleteBtn.TextSize = 12
+	deleteBtn.ZIndex = 14
+	deleteBtn.Parent = btnRow
 
 	deleteBtn.MouseButton1Click:Connect(function()
 		local identifier = folderName .. "/" .. poseName
@@ -470,23 +614,21 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	end)
 
 	local closeBtn = Instance.new("TextButton")
-	closeBtn.Size = UDim2.new(0.42, 0, 0, 32)
-	closeBtn.Position = UDim2.new(0.53, 0, 0.8, 0)
+	closeBtn.Size = UDim2.new(0.45, 0, 1, 0)
+	closeBtn.Position = UDim2.new(0.53, 0, 0, 0)
 	closeBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
 	closeBtn.Text = "Close"
 	closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 	closeBtn.Font = Enum.Font.SourceSansBold
-	closeBtn.TextSize = 13
-	closeBtn.ZIndex = 12
-	closeBtn.Parent = modalBox
-
-	local clsCorner = Instance.new("UICorner")
-	clsCorner.CornerRadius = UDim.new(0, 4)
-	clsCorner.Parent = closeBtn
+	closeBtn.TextSize = 12
+	closeBtn.ZIndex = 14
+	closeBtn.Parent = btnRow
 
 	closeBtn.MouseButton1Click:Connect(function()
 		modal:Destroy()
 	end)
+
+	modalBox.CanvasSize = UDim2.new(0, 0, 0, mLayout.AbsoluteContentSize.Y + 20)
 end
 
 ----------------------------------------------------
@@ -541,7 +683,6 @@ function refreshList()
 				local loadBtn = Instance.new("TextButton")
 				loadBtn.Size = UDim2.new(0.2, 0, 0.8, 0)
 				loadBtn.Position = UDim2.new(0.41, 0, 0.1, 0)
-				-- Change button color/text if currently loaded to indicate toggle state
 				loadBtn.BackgroundColor3 = isCurrentlyLoaded and Color3.fromRGB(180, 50, 50) or Color3.fromRGB(0, 120, 215)
 				loadBtn.Text = isCurrentlyLoaded and "Unload" or "Load"
 				loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -644,4 +785,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("xdm")
+print("hiphiphooray")
