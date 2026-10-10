@@ -170,17 +170,6 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 		return
 	end
 
-	-- Check HP Trigger Conditions before applying
-	local trigger = poseEntry.Trigger
-	if trigger and trigger.Enabled then
-		local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-		-- Ensure health is at or above MinHP and at or below MaxHP (or adjust based on your bracket logic)
-		if hpPercent < trigger.MinHP or hpPercent > trigger.MaxHP then
-			print("Pose trigger blocked: Health (" .. math.floor(hpPercent) .. "%) is outside range [" .. trigger.MinHP .. "% - " .. trigger.MaxHP .. "%]")
-			return
-		end
-	end
-
 	if activePoseLoop then
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
@@ -200,17 +189,6 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 			return
 		end
 
-		-- Evaluate Trigger Conditions continuously during run
-		local trig = poseEntry.Trigger
-		if trig and trig.Enabled then
-			local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-			-- Unload if health goes outside the designated HP bounds
-			if hpPercent < trig.MinHP or hpPercent > trig.MaxHP then
-				unloadPose(character)
-				return
-			end
-		end
-
 		for jointName, relativeCFrame in pairs(poseData) do
 			if not exclusions[jointName] then
 				local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
@@ -221,6 +199,57 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 		end
 	end)
 end
+
+----------------------------------------------------
+-- BACKGROUND AUTOMATIC HP TRIGGER SCANNER
+----------------------------------------------------
+RunService.Stepped:Connect(function()
+	local char = LocalPlayer.Character
+	if not char then return end
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then return end
+
+	local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
+	local targetPoseToLoad = nil
+	local targetPoseId = nil
+
+	-- Scan all saved poses for active triggers matching current health range
+	for folderName, poses in pairs(SavedFolders) do
+		for poseName, poseEntry in pairs(poses) do
+			local trig = poseEntry.Trigger
+			if trig and trig.Enabled then
+				-- Check if health falls within MinHP and MaxHP range
+				if hpPercent >= trig.MinHP and hpPercent <= trig.MaxHP then
+					targetPoseToLoad = poseEntry
+					targetPoseId = folderName .. "/" .. poseName
+					break
+				end
+			end
+		end
+		if targetPoseToLoad then break end
+	end
+
+	-- Handle automatic switching/loading/unloading based on triggers
+	if targetPoseToLoad then
+		if currentLoadedPoseIdentifier ~= targetPoseId then
+			applyPoseData(char, targetPoseToLoad, targetPoseId)
+		end
+	else
+		-- If a pose was loaded via trigger, but health went out of range, unload it
+		-- (Manual loads without triggers enabled will stay until manually unloaded)
+		if currentLoadedPoseIdentifier then
+			local foundFolder, foundName = currentLoadedPoseIdentifier:match("^([^/]+)/(.+)$")
+			if foundFolder and SavedFolders[foundFolder] and SavedFolders[foundFolder][foundName] then
+				local activeEntry = SavedFolders[foundFolder][foundName]
+				if activeEntry.Trigger and activeEntry.Trigger.Enabled then
+					if hpPercent < activeEntry.Trigger.MinHP or hpPercent > activeEntry.Trigger.MaxHP then
+						unloadPose(char)
+					end
+				end
+			end
+		end
+	end
+end)
 
 ----------------------------------------------------
 -- DRAGGABLE GUI HELPER (Touch & Mouse Support)
@@ -525,7 +554,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	minLbl.Size = UDim2.new(0.6, 0, 1, 0)
 	minLbl.Position = UDim2.new(0.05, 0, 0, 0)
 	minLbl.BackgroundTransparency = 1
-	minLbl.Text = "Min HP % (Required to load):"
+	minLbl.Text = "Min HP % (Floor):"
 	minLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
 	minLbl.TextXAlignment = Enum.TextXAlignment.Left
 	minLbl.Font = Enum.Font.SourceSans
@@ -564,7 +593,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	maxLbl.Size = UDim2.new(0.6, 0, 1, 0)
 	maxLbl.Position = UDim2.new(0.05, 0, 0, 0)
 	maxLbl.BackgroundTransparency = 1
-	maxLbl.Text = "Max HP % (Unload below):"
+	maxLbl.Text = "Max HP % (Ceiling):"
 	maxLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
 	maxLbl.TextXAlignment = Enum.TextXAlignment.Left
 	maxLbl.Font = Enum.Font.SourceSans
@@ -799,4 +828,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("2001919ak")
+print("xO02O02O02ak")
