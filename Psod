@@ -170,6 +170,17 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 		return
 	end
 
+	-- Check HP Trigger Conditions before applying
+	local trigger = poseEntry.Trigger
+	if trigger and trigger.Enabled then
+		local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
+		-- Ensure health is within the specified MinHP and MaxHP range
+		if hpPercent < trigger.MinHP or hpPercent > trigger.MaxHP then
+			print("Pose trigger blocked: Health (" .. math.floor(hpPercent) .. "%) is outside range [" .. trigger.MinHP .. "% - " .. trigger.MaxHP .. "%]")
+			return
+		end
+	end
+
 	if activePoseLoop then
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
@@ -189,12 +200,12 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 			return
 		end
 
-		-- Evaluate Trigger Conditions continuously
-		local trigger = poseEntry.Trigger
-		if trigger and trigger.Enabled then
+		-- Evaluate Trigger Conditions continuously during run
+		local trig = poseEntry.Trigger
+		if trig and trig.Enabled then
 			local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-			-- Unload if health drops below MaxHP or goes above/below MinHP rules if needed
-			if hpPercent < trigger.MaxHP or (trigger.MinHP > 0 and hpPercent < trigger.MinHP) then
+			-- Unload if health goes below MinHP or above MaxHP
+			if hpPercent < trig.MinHP or hpPercent > trig.MaxHP then
 				unloadPose(character)
 				return
 			end
@@ -788,4 +799,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("larpr")
+print("xdm39ak")
