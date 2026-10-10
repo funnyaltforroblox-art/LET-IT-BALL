@@ -174,7 +174,7 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 	local trigger = poseEntry.Trigger
 	if trigger and trigger.Enabled then
 		local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-		-- Ensure health is within the specified MinHP and MaxHP range
+		-- Ensure health is at or above MinHP and at or below MaxHP (or adjust based on your bracket logic)
 		if hpPercent < trigger.MinHP or hpPercent > trigger.MaxHP then
 			print("Pose trigger blocked: Health (" .. math.floor(hpPercent) .. "%) is outside range [" .. trigger.MinHP .. "% - " .. trigger.MaxHP .. "%]")
 			return
@@ -204,7 +204,7 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 		local trig = poseEntry.Trigger
 		if trig and trig.Enabled then
 			local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-			-- Unload if health goes below MinHP or above MaxHP
+			-- Unload if health goes outside the designated HP bounds
 			if hpPercent < trig.MinHP or hpPercent > trig.MaxHP then
 				unloadPose(character)
 				return
@@ -799,4 +799,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("xdm39ak")
+print("2001919ak")
