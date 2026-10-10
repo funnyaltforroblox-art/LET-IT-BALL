@@ -28,6 +28,7 @@ local CollapsedFolders = {}
 
 local activePoseLoop = nil
 local currentLoadedPoseIdentifier = nil 
+local currentLoadedPoseEntry = nil
 
 ----------------------------------------------------
 -- FILE SYSTEM (DELTA WORKSPACE STORAGE)
@@ -85,7 +86,6 @@ local function loadPosesFromFile()
 			for folderName, poses in pairs(decoded) do
 				SavedFolders[folderName] = {}
 				for poseName, poseData in pairs(poses) do
-					-- Force Trigger.Enabled to false on rejoin as requested
 					local savedTrigger = poseData.Trigger or {}
 					SavedFolders[folderName][poseName] = {
 						Joints = {},
@@ -118,6 +118,7 @@ local function unloadPose(character)
 		activePoseLoop = nil
 	end
 	currentLoadedPoseIdentifier = nil
+	currentLoadedPoseEntry = nil
 
 	local animateScript = character:FindFirstChild("Animate")
 	if animateScript and animateScript:IsA("LocalScript") then
@@ -164,20 +165,9 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not torso or not humanRoot or not humanoid then return end
 
-	-- Toggle off if clicking load on the already active pose
 	if currentLoadedPoseIdentifier == poseIdentifier then
 		unloadPose(character)
 		return
-	end
-
-	-- Check HP Trigger Conditions before applying
-	local trigger = poseEntry.Trigger
-	if trigger and trigger.Enabled then
-		local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-		if hpPercent < trigger.MinHP then
-			print("Pose trigger blocked: Health (" .. math.floor(hpPercent) .. "%) is below MinHP (" .. trigger.MinHP .. "%)")
-			return
-		end
 	end
 
 	if activePoseLoop then
@@ -186,6 +176,7 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 	end
 
 	currentLoadedPoseIdentifier = poseIdentifier
+	currentLoadedPoseEntry = poseEntry
 
 	local poseData = poseEntry.Joints
 	local exclusions = poseEntry.Exclusions or {}
@@ -198,10 +189,12 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 			return
 		end
 
-		-- Check MaxHP condition dynamically during run (unload if health drops below MaxHP)
+		-- Evaluate Trigger Conditions continuously
+		local trigger = poseEntry.Trigger
 		if trigger and trigger.Enabled then
 			local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-			if hpPercent < trigger.MaxHP then
+			-- Unload if health drops below MaxHP or goes above/below MinHP rules if needed
+			if hpPercent < trigger.MaxHP or (trigger.MinHP > 0 and hpPercent < trigger.MinHP) then
 				unloadPose(character)
 				return
 			end
@@ -773,18 +766,18 @@ toggleBtn.MouseButton1Click:Connect(function()
 end)
 
 saveBtn.MouseButton1Click:Connect(function()
-	local folderName = folderInput.Text ~= "" and folderInput.Text or "Default"
-	local poseName = poseInput.Text ~= "" and poseInput.Text or ("Pose_" .. tostring(tick()):sub(5, 8))
+	local folderInputText = folderInput.Text ~= "" and folderInput.Text or "Default"
+	local poseInputText = poseInput.Text ~= "" and poseInput.Text or ("Pose_" .. tostring(tick()):sub(5, 8))
 
 	local char = LocalPlayer.Character
 	if not char then return end
 
 	local poseData = extractPoseData(char)
 	if poseData then
-		if not SavedFolders[folderName] then
-			SavedFolders[folderName] = {}
+		if not SavedFolders[folderInputText] then
+			SavedFolders[folderInputText] = {}
 		end
-		SavedFolders[folderName][poseName] = poseData
+		SavedFolders[folderInputText][poseInputText] = poseData
 
 		poseInput.Text = ""
 		savePosesToFile()
@@ -795,4 +788,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("nil")
+print("larpr")
