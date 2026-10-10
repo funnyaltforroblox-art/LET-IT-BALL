@@ -58,7 +58,11 @@ local function savePosesToFile()
 				serializableData[folderName][poseName] = {
 					Joints = {},
 					Exclusions = poseData.Exclusions or {},
-					Trigger = poseData.Trigger or { Enabled = false, MinHP = 0, MaxHP = 100 }
+					Trigger = {
+						Enabled = poseData.Trigger and poseData.Trigger.Enabled or false,
+						MinHP = poseData.Trigger and poseData.Trigger.MinHP or 0,
+						MaxHP = poseData.Trigger and poseData.Trigger.MaxHP or 100
+					}
 				}
 				for jointName, cf in pairs(poseData.Joints) do
 					serializableData[folderName][poseName].Joints[jointName] = serializeCFrame(cf)
@@ -81,10 +85,16 @@ local function loadPosesFromFile()
 			for folderName, poses in pairs(decoded) do
 				SavedFolders[folderName] = {}
 				for poseName, poseData in pairs(poses) do
+					-- Force Trigger.Enabled to false on rejoin as requested
+					local savedTrigger = poseData.Trigger or {}
 					SavedFolders[folderName][poseName] = {
 						Joints = {},
 						Exclusions = poseData.Exclusions or {},
-						Trigger = poseData.Trigger or { Enabled = false, MinHP = 0, MaxHP = 100 }
+						Trigger = {
+							Enabled = false, 
+							MinHP = savedTrigger.MinHP or 0,
+							MaxHP = savedTrigger.MaxHP or 100
+						}
 					}
 					local rawJoints = poseData.Joints or poseData
 					for jointName, cfTbl in pairs(rawJoints) do
@@ -188,7 +198,7 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 			return
 		end
 
-		-- Check MaxHP condition dynamically during run
+		-- Check MaxHP condition dynamically during run (unload if health drops below MaxHP)
 		if trigger and trigger.Enabled then
 			local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
 			if hpPercent < trigger.MaxHP then
@@ -785,4 +795,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("hiphiphooray")
+print("nil")
