@@ -43,17 +43,21 @@ local function freezeAnimations(character)
 	end
 end
 
---- Captures exact C0 AND Transform values directly from character joints
+--- Captures exact joint states plus root-to-torso relative CFrame
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return nil end
 
-	local poseData = {}
+	local poseData = {
+		Joints = {},
+		RootRelativeCF = humanRoot.CFrame:ToObjectSpace(torso.CFrame)
+	}
+
 	for _, jointName in ipairs(R6_JOINTS) do
 		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 		if joint and joint:IsA("Motor6D") then
-			poseData[jointName] = {
+			poseData.Joints[jointName] = {
 				C0 = joint.C0,
 				Transform = joint.Transform
 			}
@@ -62,13 +66,12 @@ local function extractPoseData(character)
 	return poseData
 end
 
---- Restores saved C0 and Transform, locked every frame on Stepped
+--- Applies pose data and locks root orientation to prevent tilting/flipping
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
 
-	-- Disconnect any active enforcement loop
 	if activePoseLoop then
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
@@ -76,7 +79,7 @@ local function applyPoseData(character, poseData)
 
 	freezeAnimations(character)
 
-	-- Apply and lock pose every physics frame
+	-- Lock joints and relative root orientation every physics frame
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			if activePoseLoop then
@@ -86,7 +89,12 @@ local function applyPoseData(character, poseData)
 			return
 		end
 
-		for jointName, data in pairs(poseData) do
+		-- Lock Torso position relative to RootPart to preserve exact tilt/rotation
+		if poseData.RootRelativeCF then
+			torso.CFrame = humanRoot.CFrame * poseData.RootRelativeCF
+		end
+
+		for jointName, data in pairs(poseData.Joints) do
 			local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 			if joint and joint:IsA("Motor6D") then
 				joint.C0 = data.C0
@@ -320,12 +328,18 @@ local function refreshList()
 			exportBtn.MouseButton1Click:Connect(function()
 				print("\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---")
 				print("local " .. poseName .. " = {")
-				for joint, data in pairs(cfData) do
+				if cfData.RootRelativeCF then
+					local rx, ry, rz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cfData.RootRelativeCF:GetComponents()
+					print(string.format('    RootRelativeCF = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', rx, ry, rz, r00, r01, r02, r10, r11, r12, r20, r21, r22))
+				end
+				print("    Joints = {")
+				for joint, data in pairs(cfData.Joints) do
 					local x0, y0, z0, r00, r01, r02, r10, r11, r12, r20, r21, r22 = data.C0:GetComponents()
 					local xT, yT, zT, t00, t01, t02, t10, t11, t12, t20, t21, t22 = data.Transform:GetComponents()
-					print(string.format('    ["%s"] = { C0 = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f), Transform = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f) },', 
+					print(string.format('        ["%s"] = { C0 = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f), Transform = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f) },', 
 						joint, x0, y0, z0, r00, r01, r02, r10, r11, r12, r20, r21, r22, xT, yT, zT, t00, t01, t02, t10, t11, t12, t20, t21, t22))
 				end
+				print("    }")
 				print("}\n--------------------------")
 			end)
 		end
@@ -362,4 +376,4 @@ saveBtn.MouseButton1Click:Connect(function()
 end)
 
 refreshList()
-print("sodnt")
+print("please.")
