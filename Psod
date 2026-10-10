@@ -27,6 +27,7 @@ local SavedFolders = {
 local CollapsedFolders = {}
 
 local activePoseLoop = nil
+local currentLoadedPoseIdentifier = nil -- Tracks currently active pose for toggle-off functionality
 
 ----------------------------------------------------
 -- FILE SYSTEM (DELTA WORKSPACE STORAGE)
@@ -83,7 +84,7 @@ local function loadPosesFromFile()
 						Joints = {},
 						Exclusions = poseData.Exclusions or {}
 					}
-					local rawJoints = poseData.Joints or poseData -- Backwards compatibility for older structure
+					local rawJoints = poseData.Joints or poseData
 					for jointName, cfTbl in pairs(rawJoints) do
 						if jointName ~= "Exclusions" then
 							SavedFolders[folderName][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
@@ -99,22 +100,23 @@ end
 -- POSE & ANIMATION HELPER FUNCTIONS
 ----------------------------------------------------
 
-local function freezeAnimations(character, exclusions)
-	exclusions = exclusions or {}
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if humanoid then
-		local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid
-		if animator then
-			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-				-- If any part associated with the track is excluded, we could let it play, 
-				-- but stopping global tracks is safer for strict posing unless specifically handled.
-			end
-		end
+local function unloadPose(character)
+	if activePoseLoop then
+		activePoseLoop:Disconnect()
+		activePoseLoop = nil
 	end
+	currentLoadedPoseIdentifier = nil
 
+	-- Re-enable standard animate script
 	local animateScript = character:FindFirstChild("Animate")
 	if animateScript and animateScript:IsA("LocalScript") then
-		-- Only disable animate script if no exclusions are active, or let excluded parts animate
+		animateScript.Disabled = false
+	end
+end
+
+local function freezeAnimations(character, exclusions)
+	local animateScript = character:FindFirstChild("Animate")
+	if animateScript and animateScript:IsA("LocalScript") then
 		if next(exclusions) == nil then
 			animateScript.Disabled = true
 		end
@@ -140,19 +142,27 @@ local function extractPoseData(character)
 
 	return {
 		Joints = joints,
-		Exclusions = {} -- Default: nothing excluded
+		Exclusions = {}
 	}
 end
 
-local function applyPoseData(character, poseEntry)
+local function applyPoseData(character, poseEntry, poseIdentifier)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
+
+	-- Toggle off if clicking load on the already active pose
+	if currentLoadedPoseIdentifier == poseIdentifier then
+		unloadPose(character)
+		return
+	end
 
 	if activePoseLoop then
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
 	end
+
+	currentLoadedPoseIdentifier = poseIdentifier
 
 	local poseData = poseEntry.Joints
 	local exclusions = poseEntry.Exclusions or {}
@@ -161,15 +171,11 @@ local function applyPoseData(character, poseEntry)
 
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
-			if activePoseLoop then
-				activePoseLoop:Disconnect()
-				activePoseLoop = nil
-			end
+			unloadPose(character)
 			return
 		end
 
 		for jointName, relativeCFrame in pairs(poseData) do
-			-- Check if this joint is excluded by user settings
 			if not exclusions[jointName] then
 				local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 				if joint and joint:IsA("Motor6D") then
@@ -378,7 +384,6 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	desc.ZIndex = 12
 	desc.Parent = modalBox
 
-	-- Part Exclusion Checkboxes Container
 	local excludeContainer = Instance.new("ScrollingFrame")
 	excludeContainer.Size = UDim2.new(0.9, 0, 0.45, 0)
 	excludeContainer.Position = UDim2.new(0.05, 0, 0.28, 0)
@@ -432,7 +437,6 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 		end)
 	end
 
-	-- Delete Button
 	local deleteBtn = Instance.new("TextButton")
 	deleteBtn.Size = UDim2.new(0.42, 0, 0, 32)
 	deleteBtn.Position = UDim2.new(0.05, 0, 0.8, 0)
@@ -449,6 +453,11 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	delCorner.Parent = deleteBtn
 
 	deleteBtn.MouseButton1Click:Connect(function()
+		local identifier = folderName .. "/" .. poseName
+		if currentLoadedPoseIdentifier == identifier and LocalPlayer.Character then
+			unloadPose(LocalPlayer.Character)
+		end
+
 		if SavedFolders[folderName] then
 			SavedFolders[folderName][poseName] = nil
 			if next(SavedFolders[folderName]) == nil and folderName ~= "Default" then
@@ -460,7 +469,6 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 		end
 	end)
 
-	-- Close Button
 	local closeBtn = Instance.new("TextButton")
 	closeBtn.Size = UDim2.new(0.42, 0, 0, 32)
 	closeBtn.Position = UDim2.new(0.53, 0, 0.8, 0)
@@ -482,10 +490,10 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 end
 
 ----------------------------------------------------
--- UI REFRESH LOGIC (With Folders & Collapse State)
+-- UI REFRESH LOGIC
 ----------------------------------------------------
 
-local function refreshList()
+function refreshList()
 	for _, child in ipairs(scrollList:GetChildren()) do
 		if not child:IsA("UIListLayout") then
 			child:Destroy()
@@ -495,7 +503,6 @@ local function refreshList()
 	for folderName, poses in pairs(SavedFolders) do
 		local isCollapsed = CollapsedFolders[folderName] or false
 
-		-- Folder Header Button
 		local folderHeader = Instance.new("TextButton")
 		folderHeader.Size = UDim2.new(1, -8, 0, 25)
 		folderHeader.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
@@ -513,6 +520,9 @@ local function refreshList()
 
 		if not isCollapsed then
 			for poseName, poseEntry in pairs(poses) do
+				local poseIdentifier = folderName .. "/" .. poseName
+				local isCurrentlyLoaded = (currentLoadedPoseIdentifier == poseIdentifier)
+
 				local poseItem = Instance.new("Frame")
 				poseItem.Size = UDim2.new(1, -8, 0, 30)
 				poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
@@ -531,8 +541,9 @@ local function refreshList()
 				local loadBtn = Instance.new("TextButton")
 				loadBtn.Size = UDim2.new(0.2, 0, 0.8, 0)
 				loadBtn.Position = UDim2.new(0.41, 0, 0.1, 0)
-				loadBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
-				loadBtn.Text = "Load"
+				-- Change button color/text if currently loaded to indicate toggle state
+				loadBtn.BackgroundColor3 = isCurrentlyLoaded and Color3.fromRGB(180, 50, 50) or Color3.fromRGB(0, 120, 215)
+				loadBtn.Text = isCurrentlyLoaded and "Unload" or "Load"
 				loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 				loadBtn.Font = Enum.Font.SourceSansBold
 				loadBtn.TextSize = 12
@@ -544,7 +555,8 @@ local function refreshList()
 
 				loadBtn.MouseButton1Click:Connect(function()
 					if LocalPlayer.Character then
-						applyPoseData(LocalPlayer.Character, poseEntry)
+						applyPoseData(LocalPlayer.Character, poseEntry, poseIdentifier)
+						refreshList()
 					end
 				end)
 
@@ -632,4 +644,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("welarpnow")
+print("xdm")
