@@ -2,6 +2,7 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -15,12 +16,76 @@ local R6_LIMB_MAP = {
 	["HumanoidRootPart"] = "RootJoint"
 }
 
--- Pose Database
+-- Workspace Save Configuration
+local FOLDER_NAME = "R6PoseManager"
+local FILE_NAME = FOLDER_NAME .. "/SavedPoses.json"
+
+-- Pose Database & Folder State
 local SavedFolders = {
 	["Default"] = {}
 }
+local CollapsedFolders = {}
 
 local activePoseLoop = nil
+
+----------------------------------------------------
+-- FILE SYSTEM (DELTA WORKSPACE STORAGE)
+----------------------------------------------------
+
+local function serializeCFrame(cf)
+	local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
+	return {x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22}
+end
+
+local function deserializeCFrame(tbl)
+	if not tbl then return CFrame.identity end
+	return CFrame.new(unpack(tbl))
+end
+
+local function savePosesToFile()
+	if not writefile then return end
+	
+	pcall(function()
+		if not isfolder(FOLDER_NAME) then
+			makefolder(FOLDER_NAME)
+		end
+		
+		-- Convert CFrames into serializable arrays
+		local serializableData = {}
+		for folderName, poses in pairs(SavedFolders) do
+			serializableData[folderName] = {}
+			for poseName, poseData in pairs(poses) do
+				serializableData[folderName][poseName] = {}
+				for jointName, cf in pairs(poseData) do
+					serializableData[folderName][poseName][jointName] = serializeCFrame(cf)
+				end
+			end
+		end
+		
+		writefile(FILE_NAME, HttpService:JSONEncode(serializableData))
+	end)
+end
+
+local function loadPosesFromFile()
+	if not readfile or not isfile or not isfile(FILE_NAME) then return end
+	
+	pcall(function()
+		local content = readfile(FILE_NAME)
+		local decoded = HttpService:JSONDecode(content)
+		if decoded then
+			SavedFolders = {}
+			for folderName, poses in pairs(decoded) do
+				SavedFolders[folderName] = {}
+				for poseName, poseData in pairs(poses) do
+					SavedFolders[folderName][poseName] = {}
+					for jointName, cfTbl in pairs(poseData) do
+						SavedFolders[folderName][poseName][jointName] = deserializeCFrame(cfTbl)
+					end
+				end
+			end
+		end
+	end)
+end
 
 ----------------------------------------------------
 -- POSE & ANIMATION HELPER FUNCTIONS
@@ -43,7 +108,6 @@ local function freezeAnimations(character)
 	end
 end
 
---- Captures exact World-Space relative limb CFrames to completely avoid 90-deg axis mismatch
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
 	if not torso then return nil end
@@ -56,7 +120,6 @@ local function extractPoseData(character)
 		local joint = parentPart and (parentPart:FindFirstChild(jointName) or torso:FindFirstChild(jointName))
 
 		if limb and joint and joint:IsA("Motor6D") then
-			-- Calculate limb CFrame relative to the Torso
 			local relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
 			poseData[jointName] = relativeCFrame
 		end
@@ -65,7 +128,6 @@ local function extractPoseData(character)
 	return poseData
 end
 
---- Applies relative CFrames cleanly by driving joint C0/Transform matrix reconstruction
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
@@ -78,7 +140,6 @@ local function applyPoseData(character, poseData)
 
 	freezeAnimations(character)
 
-	-- Enforce target limb relative position every Stepped frame to maintain dynamic pose without static resets
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			if activePoseLoop then
@@ -91,9 +152,6 @@ local function applyPoseData(character, poseData)
 		for jointName, relativeCFrame in pairs(poseData) do
 			local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 			if joint and joint:IsA("Motor6D") then
-				-- Solve target Transform to match exact world-space relative placement
-				local targetTransform = joint.C0:Inverse() * torso.CFrame:ToObjectSpace((joint.Part1 and joint.Part1.CFrame) or torso.CFrame) * joint.C1
-				-- Smoothly lock transform to match target relative matrix
 				joint.Transform = joint.C0:Inverse() * relativeCFrame * joint.C1
 			end
 		end
@@ -250,7 +308,7 @@ listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 listLayout.Padding = UDim.new(0, 4)
 
 ----------------------------------------------------
--- UI REFRESH LOGIC
+-- UI REFRESH LOGIC (With Folders & Collapse State)
 ----------------------------------------------------
 
 local function refreshList()
@@ -261,75 +319,91 @@ local function refreshList()
 	end
 
 	for folderName, poses in pairs(SavedFolders) do
-		local folderHeader = Instance.new("TextLabel")
+		local isCollapsed = CollapsedFolders[folderName] or false
+
+		-- Folder Header Button (Clickable to collapse/expand)
+		local folderHeader = Instance.new("TextButton")
 		folderHeader.Size = UDim2.new(1, -8, 0, 25)
 		folderHeader.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-		folderHeader.Text = " 📁 " .. folderName
+		folderHeader.Text = (isCollapsed and " ▶ 📁 " or " ▼ 📁 ") .. folderName
 		folderHeader.TextColor3 = Color3.fromRGB(255, 215, 0)
 		folderHeader.TextXAlignment = Enum.TextXAlignment.Left
 		folderHeader.Font = Enum.Font.SourceSansBold
 		folderHeader.TextSize = 14
 		folderHeader.Parent = scrollList
 
-		for poseName, cfData in pairs(poses) do
-			local poseItem = Instance.new("Frame")
-			poseItem.Size = UDim2.new(1, -8, 0, 30)
-			poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
-			poseItem.Parent = scrollList
+		folderHeader.MouseButton1Click:Connect(function()
+			CollapsedFolders[folderName] = not isCollapsed
+			refreshList()
+		end)
 
-			local poseNameLabel = Instance.new("TextLabel")
-			poseNameLabel.Size = UDim2.new(0.5, 0, 1, 0)
-			poseNameLabel.BackgroundTransparency = 1
-			poseNameLabel.Text = "   " .. poseName
-			poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
-			poseNameLabel.TextXAlignment = Enum.TextXAlignment.Left
-			poseNameLabel.Font = Enum.Font.SourceSans
-			poseNameLabel.TextSize = 13
-			poseNameLabel.Parent = poseItem
+		-- Only render poses inside the folder if it's not collapsed
+		if not isCollapsed then
+			for poseName, cfData in pairs(poses) do
+				local poseItem = Instance.new("Frame")
+				poseItem.Size = UDim2.new(1, -8, 0, 30)
+				poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
+				poseItem.Parent = scrollList
 
-			local loadBtn = Instance.new("TextButton")
-			loadBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
-			loadBtn.Position = UDim2.new(0.52, 0, 0.1, 0)
-			loadBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
-			loadBtn.Text = "Load"
-			loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			loadBtn.Font = Enum.Font.SourceSansBold
-			loadBtn.TextSize = 12
-			loadBtn.Parent = poseItem
+				local poseNameLabel = Instance.new("TextLabel")
+				poseNameLabel.Size = UDim2.new(0.5, 0, 1, 0)
+				poseNameLabel.BackgroundTransparency = 1
+				poseNameLabel.Text = "   " .. poseName
+				poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+				poseNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+				poseNameLabel.Font = Enum.Font.SourceSans
+				poseNameLabel.TextSize = 13
+				poseNameLabel.Parent = poseItem
 
-			local btnCorner1 = Instance.new("UICorner")
-			btnCorner1.CornerRadius = UDim.new(0, 4)
-			btnCorner1.Parent = loadBtn
+				local loadBtn = Instance.new("TextButton")
+				loadBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
+				loadBtn.Position = UDim2.new(0.52, 0, 0.1, 0)
+				loadBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
+				loadBtn.Text = "Load"
+				loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+				loadBtn.Font = Enum.Font.SourceSansBold
+				loadBtn.TextSize = 12
+				loadBtn.Parent = poseItem
 
-			loadBtn.MouseButton1Click:Connect(function()
-				if LocalPlayer.Character then
-					applyPoseData(LocalPlayer.Character, cfData)
-				end
-			end)
+				local btnCorner1 = Instance.new("UICorner")
+				btnCorner1.CornerRadius = UDim.new(0, 4)
+				btnCorner1.Parent = loadBtn
 
-			local exportBtn = Instance.new("TextButton")
-			exportBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
-			exportBtn.Position = UDim2.new(0.76, 0, 0.1, 0)
-			exportBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
-			exportBtn.Text = "Export"
-			exportBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			exportBtn.Font = Enum.Font.SourceSansBold
-			exportBtn.TextSize = 12
-			exportBtn.Parent = poseItem
+				loadBtn.MouseButton1Click:Connect(function()
+					if LocalPlayer.Character then
+						applyPoseData(LocalPlayer.Character, cfData)
+					end
+				end)
 
-			local btnCorner2 = Instance.new("UICorner")
-			btnCorner2.CornerRadius = UDim.new(0, 4)
-			btnCorner2.Parent = exportBtn
+				local exportBtn = Instance.new("TextButton")
+				exportBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
+				exportBtn.Position = UDim2.new(0.76, 0, 0.1, 0)
+				exportBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
+				exportBtn.Text = "Export"
+				exportBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+				exportBtn.Font = Enum.Font.SourceSansBold
+				exportBtn.TextSize = 12
+				exportBtn.Parent = poseItem
 
-			exportBtn.MouseButton1Click:Connect(function()
-				print("\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---")
-				print("local " .. poseName .. " = {")
-				for joint, cf in pairs(cfData) do
-					local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
-					print(string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22))
-				end
-				print("}\n--------------------------")
-			end)
+				local btnCorner2 = Instance.new("UICorner")
+				btnCorner2.CornerRadius = UDim.new(0, 4)
+				btnCorner2.Parent = exportBtn
+
+				exportBtn.MouseButton1Click:Connect(function()
+					local exportString = "\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---\n"
+					exportString = exportString .. "local " .. poseName .. " = {\n"
+					for joint, cf in pairs(cfData) do
+						local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
+						exportString = exportString .. string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),\n', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+					end
+					exportString = exportString .. "}\n--------------------------"
+					
+					print(exportString)
+					pcall(function()
+						setclipboard(exportString)
+					end)
+				end)
+			end
 		end
 	end
 
@@ -359,9 +433,12 @@ saveBtn.MouseButton1Click:Connect(function()
 		SavedFolders[folderName][poseName] = poseData
 
 		poseInput.Text = ""
+		savePosesToFile() -- Automatically saves to Delta workspace file
 		refreshList()
 	end
 end)
 
+-- Load existing saved poses on startup
+loadPosesFromFile()
 refreshList()
-print("the")
+print("works")
