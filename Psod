@@ -50,14 +50,16 @@ local function savePosesToFile()
 			makefolder(FOLDER_NAME)
 		end
 		
-		-- Convert CFrames into serializable arrays
 		local serializableData = {}
 		for folderName, poses in pairs(SavedFolders) do
 			serializableData[folderName] = {}
 			for poseName, poseData in pairs(poses) do
-				serializableData[folderName][poseName] = {}
-				for jointName, cf in pairs(poseData) do
-					serializableData[folderName][poseName][jointName] = serializeCFrame(cf)
+				serializableData[folderName][poseName] = {
+					Joints = {},
+					Exclusions = poseData.Exclusions or {}
+				}
+				for jointName, cf in pairs(poseData.Joints) do
+					serializableData[folderName][poseName].Joints[jointName] = serializeCFrame(cf)
 				end
 			end
 		end
@@ -77,9 +79,15 @@ local function loadPosesFromFile()
 			for folderName, poses in pairs(decoded) do
 				SavedFolders[folderName] = {}
 				for poseName, poseData in pairs(poses) do
-					SavedFolders[folderName][poseName] = {}
-					for jointName, cfTbl in pairs(poseData) do
-						SavedFolders[folderName][poseName][jointName] = deserializeCFrame(cfTbl)
+					SavedFolders[folderName][poseName] = {
+						Joints = {},
+						Exclusions = poseData.Exclusions or {}
+					}
+					local rawJoints = poseData.Joints or poseData -- Backwards compatibility for older structure
+					for jointName, cfTbl in pairs(rawJoints) do
+						if jointName ~= "Exclusions" then
+							SavedFolders[folderName][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
+						end
 					end
 				end
 			end
@@ -91,20 +99,25 @@ end
 -- POSE & ANIMATION HELPER FUNCTIONS
 ----------------------------------------------------
 
-local function freezeAnimations(character)
+local function freezeAnimations(character, exclusions)
+	exclusions = exclusions or {}
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if humanoid then
 		local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid
 		if animator then
 			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-				track:Stop(0)
+				-- If any part associated with the track is excluded, we could let it play, 
+				-- but stopping global tracks is safer for strict posing unless specifically handled.
 			end
 		end
 	end
 
 	local animateScript = character:FindFirstChild("Animate")
 	if animateScript and animateScript:IsA("LocalScript") then
-		animateScript.Disabled = true
+		-- Only disable animate script if no exclusions are active, or let excluded parts animate
+		if next(exclusions) == nil then
+			animateScript.Disabled = true
+		end
 	end
 end
 
@@ -112,7 +125,7 @@ local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
 	if not torso then return nil end
 
-	local poseData = {}
+	local joints = {}
 
 	for limbName, jointName in pairs(R6_LIMB_MAP) do
 		local limb = character:FindFirstChild(limbName)
@@ -121,14 +134,17 @@ local function extractPoseData(character)
 
 		if limb and joint and joint:IsA("Motor6D") then
 			local relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
-			poseData[jointName] = relativeCFrame
+			joints[jointName] = relativeCFrame
 		end
 	end
 
-	return poseData
+	return {
+		Joints = joints,
+		Exclusions = {} -- Default: nothing excluded
+	}
 end
 
-local function applyPoseData(character, poseData)
+local function applyPoseData(character, poseEntry)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	if not torso or not humanRoot then return end
@@ -138,7 +154,10 @@ local function applyPoseData(character, poseData)
 		activePoseLoop = nil
 	end
 
-	freezeAnimations(character)
+	local poseData = poseEntry.Joints
+	local exclusions = poseEntry.Exclusions or {}
+
+	freezeAnimations(character, exclusions)
 
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
@@ -150,9 +169,12 @@ local function applyPoseData(character, poseData)
 		end
 
 		for jointName, relativeCFrame in pairs(poseData) do
-			local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
-			if joint and joint:IsA("Motor6D") then
-				joint.Transform = joint.C0:Inverse() * relativeCFrame * joint.C1
+			-- Check if this joint is excluded by user settings
+			if not exclusions[jointName] then
+				local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
+				if joint and joint:IsA("Motor6D") then
+					joint.Transform = joint.C0:Inverse() * relativeCFrame * joint.C1
+				end
 			end
 		end
 	end)
@@ -308,6 +330,158 @@ listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 listLayout.Padding = UDim.new(0, 4)
 
 ----------------------------------------------------
+-- SETTINGS POPUP MODAL
+----------------------------------------------------
+
+local function openPoseSettings(folderName, poseName, poseEntry)
+	local existingModal = mainFrame:FindFirstChild("SettingsModal")
+	if existingModal then existingModal:Destroy() end
+
+	local modal = Instance.new("Frame")
+	modal.Name = "SettingsModal"
+	modal.Size = UDim2.new(1, 0, 1, 0)
+	modal.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+	modal.BackgroundTransparency = 0.1
+	modal.ZIndex = 10
+	modal.Parent = mainFrame
+
+	local modalBox = Instance.new("Frame")
+	modalBox.Size = UDim2.new(0.85, 0, 0.7, 0)
+	modalBox.Position = UDim2.new(0.075, 0, 0.15, 0)
+	modalBox.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+	modalBox.ZIndex = 11
+	modalBox.Parent = modal
+
+	local modalCorner = Instance.new("UICorner")
+	modalCorner.CornerRadius = UDim.new(0, 8)
+	modalCorner.Parent = modalBox
+
+	local modalTitle = Instance.new("TextLabel")
+	modalTitle.Size = UDim2.new(1, 0, 0, 35)
+	modalTitle.BackgroundTransparency = 1
+	modalTitle.Text = "Settings: " .. poseName
+	modalTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+	modalTitle.Font = Enum.Font.SourceSansBold
+	modalTitle.TextSize = 15
+	modalTitle.ZIndex = 12
+	modalTitle.Parent = modalBox
+
+	local desc = Instance.new("TextLabel")
+	desc.Size = UDim2.new(0.9, 0, 0, 30)
+	desc.Position = UDim2.new(0.05, 0, 0.12, 0)
+	desc.BackgroundTransparency = 1
+	desc.Text = "Check parts to EXCLUDE from this pose (allow normal animations):"
+	desc.TextColor3 = Color3.fromRGB(180, 180, 180)
+	desc.Font = Enum.Font.SourceSans
+	desc.TextSize = 11
+	desc.TextWrapped = true
+	desc.ZIndex = 12
+	desc.Parent = modalBox
+
+	-- Part Exclusion Checkboxes Container
+	local excludeContainer = Instance.new("ScrollingFrame")
+	excludeContainer.Size = UDim2.new(0.9, 0, 0.45, 0)
+	excludeContainer.Position = UDim2.new(0.05, 0, 0.28, 0)
+	excludeContainer.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+	excludeContainer.BorderSizePixel = 0
+	excludeContainer.ZIndex = 12
+	excludeContainer.Parent = modalBox
+
+	local excLayout = Instance.new("UIListLayout")
+	excLayout.Parent = excludeContainer
+	excLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	excLayout.Padding = UDim.new(0, 4)
+
+	poseEntry.Exclusions = poseEntry.Exclusions or {}
+
+	for _, jointName in ipairs({"Neck", "Right Shoulder", "Left Shoulder", "Right Hip", "Left Hip", "RootJoint"}) do
+		local row = Instance.new("TextButton")
+		row.Size = UDim2.new(1, 0, 0, 26)
+		row.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+		row.Text = ""
+		row.ZIndex = 13
+		row.Parent = excludeContainer
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(0.75, 0, 1, 0)
+		label.Position = UDim2.new(0.05, 0, 0, 0)
+		label.BackgroundTransparency = 1
+		label.Text = jointName
+		label.TextColor3 = Color3.fromRGB(220, 220, 220)
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Font = Enum.Font.SourceSans
+		label.TextSize = 13
+		label.ZIndex = 14
+		label.Parent = row
+
+		local check = Instance.new("TextLabel")
+		check.Size = UDim2.new(0, 20, 0, 20)
+		check.Position = UDim2.new(0.85, 0, 0.15, 0)
+		check.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+		check.Text = poseEntry.Exclusions[jointName] and "✓" or ""
+		check.TextColor3 = Color3.fromRGB(0, 255, 100)
+		check.Font = Enum.Font.SourceSansBold
+		check.TextSize = 14
+		check.ZIndex = 14
+		check.Parent = row
+
+		row.MouseButton1Click:Connect(function()
+			poseEntry.Exclusions[jointName] = not poseEntry.Exclusions[jointName]
+			check.Text = poseEntry.Exclusions[jointName] and "✓" or ""
+			savePosesToFile()
+		end)
+	end
+
+	-- Delete Button
+	local deleteBtn = Instance.new("TextButton")
+	deleteBtn.Size = UDim2.new(0.42, 0, 0, 32)
+	deleteBtn.Position = UDim2.new(0.05, 0, 0.8, 0)
+	deleteBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+	deleteBtn.Text = "Delete Pose"
+	deleteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	deleteBtn.Font = Enum.Font.SourceSansBold
+	deleteBtn.TextSize = 13
+	deleteBtn.ZIndex = 12
+	deleteBtn.Parent = modalBox
+
+	local delCorner = Instance.new("UICorner")
+	delCorner.CornerRadius = UDim.new(0, 4)
+	delCorner.Parent = deleteBtn
+
+	deleteBtn.MouseButton1Click:Connect(function()
+		if SavedFolders[folderName] then
+			SavedFolders[folderName][poseName] = nil
+			if next(SavedFolders[folderName]) == nil and folderName ~= "Default" then
+				SavedFolders[folderName] = nil
+			end
+			savePosesToFile()
+			modal:Destroy()
+			refreshList()
+		end
+	end)
+
+	-- Close Button
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Size = UDim2.new(0.42, 0, 0, 32)
+	closeBtn.Position = UDim2.new(0.53, 0, 0.8, 0)
+	closeBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
+	closeBtn.Text = "Close"
+	closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	closeBtn.Font = Enum.Font.SourceSansBold
+	closeBtn.TextSize = 13
+	closeBtn.ZIndex = 12
+	closeBtn.Parent = modalBox
+
+	local clsCorner = Instance.new("UICorner")
+	clsCorner.CornerRadius = UDim.new(0, 4)
+	clsCorner.Parent = closeBtn
+
+	closeBtn.MouseButton1Click:Connect(function()
+		modal:Destroy()
+	end)
+end
+
+----------------------------------------------------
 -- UI REFRESH LOGIC (With Folders & Collapse State)
 ----------------------------------------------------
 
@@ -321,7 +495,7 @@ local function refreshList()
 	for folderName, poses in pairs(SavedFolders) do
 		local isCollapsed = CollapsedFolders[folderName] or false
 
-		-- Folder Header Button (Clickable to collapse/expand)
+		-- Folder Header Button
 		local folderHeader = Instance.new("TextButton")
 		folderHeader.Size = UDim2.new(1, -8, 0, 25)
 		folderHeader.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
@@ -337,16 +511,15 @@ local function refreshList()
 			refreshList()
 		end)
 
-		-- Only render poses inside the folder if it's not collapsed
 		if not isCollapsed then
-			for poseName, cfData in pairs(poses) do
+			for poseName, poseEntry in pairs(poses) do
 				local poseItem = Instance.new("Frame")
 				poseItem.Size = UDim2.new(1, -8, 0, 30)
 				poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
 				poseItem.Parent = scrollList
 
 				local poseNameLabel = Instance.new("TextLabel")
-				poseNameLabel.Size = UDim2.new(0.5, 0, 1, 0)
+				poseNameLabel.Size = UDim2.new(0.4, 0, 1, 0)
 				poseNameLabel.BackgroundTransparency = 1
 				poseNameLabel.Text = "   " .. poseName
 				poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
@@ -356,8 +529,8 @@ local function refreshList()
 				poseNameLabel.Parent = poseItem
 
 				local loadBtn = Instance.new("TextButton")
-				loadBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
-				loadBtn.Position = UDim2.new(0.52, 0, 0.1, 0)
+				loadBtn.Size = UDim2.new(0.2, 0, 0.8, 0)
+				loadBtn.Position = UDim2.new(0.41, 0, 0.1, 0)
 				loadBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
 				loadBtn.Text = "Load"
 				loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -371,28 +544,46 @@ local function refreshList()
 
 				loadBtn.MouseButton1Click:Connect(function()
 					if LocalPlayer.Character then
-						applyPoseData(LocalPlayer.Character, cfData)
+						applyPoseData(LocalPlayer.Character, poseEntry)
 					end
 				end)
 
+				local settingsBtn = Instance.new("TextButton")
+				settingsBtn.Size = UDim2.new(0.17, 0, 0.8, 0)
+				settingsBtn.Position = UDim2.new(0.62, 0, 0.1, 0)
+				settingsBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 95)
+				settingsBtn.Text = "⚙️"
+				settingsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+				settingsBtn.Font = Enum.Font.SourceSansBold
+				settingsBtn.TextSize = 12
+				settingsBtn.Parent = poseItem
+
+				local btnCorner2 = Instance.new("UICorner")
+				btnCorner2.CornerRadius = UDim.new(0, 4)
+				btnCorner2.Parent = settingsBtn
+
+				settingsBtn.MouseButton1Click:Connect(function()
+					openPoseSettings(folderName, poseName, poseEntry)
+				end)
+
 				local exportBtn = Instance.new("TextButton")
-				exportBtn.Size = UDim2.new(0.22, 0, 0.8, 0)
-				exportBtn.Position = UDim2.new(0.76, 0, 0.1, 0)
+				exportBtn.Size = UDim2.new(0.18, 0, 0.8, 0)
+				exportBtn.Position = UDim2.new(0.80, 0, 0.1, 0)
 				exportBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
 				exportBtn.Text = "Export"
 				exportBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 				exportBtn.Font = Enum.Font.SourceSansBold
-				exportBtn.TextSize = 12
+				exportBtn.TextSize = 11
 				exportBtn.Parent = poseItem
 
-				local btnCorner2 = Instance.new("UICorner")
-				btnCorner2.CornerRadius = UDim.new(0, 4)
-				btnCorner2.Parent = exportBtn
+				local btnCorner3 = Instance.new("UICorner")
+				btnCorner3.CornerRadius = UDim.new(0, 4)
+				btnCorner3.Parent = exportBtn
 
 				exportBtn.MouseButton1Click:Connect(function()
 					local exportString = "\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---\n"
 					exportString = exportString .. "local " .. poseName .. " = {\n"
-					for joint, cf in pairs(cfData) do
+					for joint, cf in pairs(poseEntry.Joints) do
 						local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
 						exportString = exportString .. string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),\n', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
 					end
@@ -433,7 +624,7 @@ saveBtn.MouseButton1Click:Connect(function()
 		SavedFolders[folderName][poseName] = poseData
 
 		poseInput.Text = ""
-		savePosesToFile() -- Automatically saves to Delta workspace file
+		savePosesToFile()
 		refreshList()
 	end
 end)
@@ -441,4 +632,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("works")
+print("welarpnow")
