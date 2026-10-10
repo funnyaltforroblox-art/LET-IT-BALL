@@ -43,7 +43,7 @@ local function freezeAnimations(character)
 	end
 end
 
---- Captures exact joint states plus root-to-torso relative CFrame
+--- Captures exact joint states plus absolute orientation offsets for root/torso
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
@@ -51,7 +51,8 @@ local function extractPoseData(character)
 
 	local poseData = {
 		Joints = {},
-		RootRelativeCF = humanRoot.CFrame:ToObjectSpace(torso.CFrame)
+		-- Save local orientation offset of Torso relative to RootPart orientation matrix
+		TorsoRotationOffset = humanRoot.CFrame - humanRoot.Position
 	}
 
 	for _, jointName in ipairs(R6_JOINTS) do
@@ -66,7 +67,7 @@ local function extractPoseData(character)
 	return poseData
 end
 
---- Applies pose data and locks root orientation to prevent tilting/flipping
+--- Applies pose data while strictly enforcing correct root orientation alignment
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
@@ -79,7 +80,7 @@ local function applyPoseData(character, poseData)
 
 	freezeAnimations(character)
 
-	-- Lock joints and relative root orientation every physics frame
+	-- Lock joints and orientation every physics frame
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			if activePoseLoop then
@@ -89,9 +90,10 @@ local function applyPoseData(character, poseData)
 			return
 		end
 
-		-- Lock Torso position relative to RootPart to preserve exact tilt/rotation
-		if poseData.RootRelativeCF then
-			torso.CFrame = humanRoot.CFrame * poseData.RootRelativeCF
+		-- Lock Torso rotation orientation directly to match the saved pose offset
+		if poseData.TorsoRotationOffset then
+			local currentPos = torso.Position
+			torso.CFrame = poseData.TorsoRotationOffset + currentPos
 		end
 
 		for jointName, data in pairs(poseData.Joints) do
@@ -328,9 +330,9 @@ local function refreshList()
 			exportBtn.MouseButton1Click:Connect(function()
 				print("\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---")
 				print("local " .. poseName .. " = {")
-				if cfData.RootRelativeCF then
-					local rx, ry, rz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cfData.RootRelativeCF:GetComponents()
-					print(string.format('    RootRelativeCF = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', rx, ry, rz, r00, r01, r02, r10, r11, r12, r20, r21, r22))
+				if cfData.TorsoRotationOffset then
+					local rx, ry, rz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cfData.TorsoRotationOffset:GetComponents()
+					print(string.format('    TorsoRotationOffset = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', rx, ry, rz, r00, r01, r02, r10, r11, r12, r20, r21, r22))
 				end
 				print("    Joints = {")
 				for joint, data in pairs(cfData.Joints) do
@@ -340,7 +342,7 @@ local function refreshList()
 						joint, x0, y0, z0, r00, r01, r02, r10, r11, r12, r20, r21, r22, xT, yT, zT, t00, t01, t02, t10, t11, t12, t20, t21, t22))
 				end
 				print("    }")
-				print("}\n--------------------------")
+				print("print(\"}\n--------------------------\")")
 			end)
 		end
 	end
@@ -376,4 +378,4 @@ saveBtn.MouseButton1Click:Connect(function()
 end)
 
 refreshList()
-print("please.")
+print("og")
