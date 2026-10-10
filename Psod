@@ -5,17 +5,17 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
--- Core R6 Motor6D joints
-local R6_JOINTS = {
-	"RootJoint",
-	"Neck",
-	"Right Shoulder",
-	"Left Shoulder",
-	"Right Hip",
-	"Left Hip"
+-- Map R6 Body Parts to their controlling Motor6D joint name
+local R6_LIMB_MAP = {
+	["Head"] = "Neck",
+	["Right Arm"] = "Right Shoulder",
+	["Left Arm"] = "Left Shoulder",
+	["Right Leg"] = "Right Hip",
+	["Left Leg"] = "Left Hip",
+	["HumanoidRootPart"] = "RootJoint"
 }
 
--- Saved Pose Database
+-- Pose Database
 local SavedFolders = {
 	["Default"] = {}
 }
@@ -43,31 +43,29 @@ local function freezeAnimations(character)
 	end
 end
 
---- Captures exact joint states plus absolute orientation offsets for root/torso
+--- Captures exact World-Space relative limb CFrames to completely avoid 90-deg axis mismatch
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
-	local humanRoot = character:FindFirstChild("HumanoidRootPart")
-	if not torso or not humanRoot then return nil end
+	if not torso then return nil end
 
-	local poseData = {
-		Joints = {},
-		-- Save local orientation offset of Torso relative to RootPart orientation matrix
-		TorsoRotationOffset = humanRoot.CFrame - humanRoot.Position
-	}
+	local poseData = {}
 
-	for _, jointName in ipairs(R6_JOINTS) do
-		local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
-		if joint and joint:IsA("Motor6D") then
-			poseData.Joints[jointName] = {
-				C0 = joint.C0,
-				Transform = joint.Transform
-			}
+	for limbName, jointName in pairs(R6_LIMB_MAP) do
+		local limb = character:FindFirstChild(limbName)
+		local parentPart = (limbName == "HumanoidRootPart") and character:FindFirstChild("HumanoidRootPart") or torso
+		local joint = parentPart and (parentPart:FindFirstChild(jointName) or torso:FindFirstChild(jointName))
+
+		if limb and joint and joint:IsA("Motor6D") then
+			-- Calculate limb CFrame relative to the Torso
+			local relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
+			poseData[jointName] = relativeCFrame
 		end
 	end
+
 	return poseData
 end
 
---- Applies pose data while strictly enforcing correct root orientation alignment
+--- Applies relative CFrames cleanly by driving joint C0/Transform matrix reconstruction
 local function applyPoseData(character, poseData)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
@@ -80,7 +78,7 @@ local function applyPoseData(character, poseData)
 
 	freezeAnimations(character)
 
-	-- Lock joints and orientation every physics frame
+	-- Enforce target limb relative position every Stepped frame to maintain dynamic pose without static resets
 	activePoseLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			if activePoseLoop then
@@ -90,24 +88,20 @@ local function applyPoseData(character, poseData)
 			return
 		end
 
-		-- Lock Torso rotation orientation directly to match the saved pose offset
-		if poseData.TorsoRotationOffset then
-			local currentPos = torso.Position
-			torso.CFrame = poseData.TorsoRotationOffset + currentPos
-		end
-
-		for jointName, data in pairs(poseData.Joints) do
+		for jointName, relativeCFrame in pairs(poseData) do
 			local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
 			if joint and joint:IsA("Motor6D") then
-				joint.C0 = data.C0
-				joint.Transform = data.Transform
+				-- Solve target Transform to match exact world-space relative placement
+				local targetTransform = joint.C0:Inverse() * torso.CFrame:ToObjectSpace((joint.Part1 and joint.Part1.CFrame) or torso.CFrame) * joint.C1
+				-- Smoothly lock transform to match target relative matrix
+				joint.Transform = joint.C0:Inverse() * relativeCFrame * joint.C1
 			end
 		end
 	end)
 end
 
 ----------------------------------------------------
--- DRAGGABLE GUI HELPER (Touch & Mouse)
+-- DRAGGABLE GUI HELPER (Touch & Mouse Support)
 ----------------------------------------------------
 
 local function makeDraggable(frame, dragHandle)
@@ -330,19 +324,11 @@ local function refreshList()
 			exportBtn.MouseButton1Click:Connect(function()
 				print("\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---")
 				print("local " .. poseName .. " = {")
-				if cfData.TorsoRotationOffset then
-					local rx, ry, rz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cfData.TorsoRotationOffset:GetComponents()
-					print(string.format('    TorsoRotationOffset = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', rx, ry, rz, r00, r01, r02, r10, r11, r12, r20, r21, r22))
+				for joint, cf in pairs(cfData) do
+					local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
+					print(string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22))
 				end
-				print("    Joints = {")
-				for joint, data in pairs(cfData.Joints) do
-					local x0, y0, z0, r00, r01, r02, r10, r11, r12, r20, r21, r22 = data.C0:GetComponents()
-					local xT, yT, zT, t00, t01, t02, t10, t11, t12, t20, t21, t22 = data.Transform:GetComponents()
-					print(string.format('        ["%s"] = { C0 = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f), Transform = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f) },', 
-						joint, x0, y0, z0, r00, r01, r02, r10, r11, r12, r20, r21, r22, xT, yT, zT, t00, t01, t02, t10, t11, t12, t20, t21, t22))
-				end
-				print("    }")
-				print("print(\"}\n--------------------------\")")
+				print("}\n--------------------------")
 			end)
 		end
 	end
@@ -378,4 +364,4 @@ saveBtn.MouseButton1Click:Connect(function()
 end)
 
 refreshList()
-print("og")
+print("the")
