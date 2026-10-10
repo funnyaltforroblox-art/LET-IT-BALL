@@ -137,17 +137,24 @@ end
 
 local function extractPoseData(character)
 	local torso = character:FindFirstChild("Torso")
-	if not torso then return nil end
+	local humanRoot = character:FindFirstChild("HumanoidRootPart")
+	if not torso or not humanRoot then return nil end
 
 	local joints = {}
 
 	for limbName, jointName in pairs(R6_LIMB_MAP) do
 		local limb = character:FindFirstChild(limbName)
-		local parentPart = (limbName == "HumanoidRootPart") and character:FindFirstChild("HumanoidRootPart") or torso
+		local parentPart = (limbName == "HumanoidRootPart") and humanRoot or torso
 		local joint = parentPart and (parentPart:FindFirstChild(jointName) or torso:FindFirstChild(jointName))
 
 		if limb and joint and joint:IsA("Motor6D") then
-			local relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
+			local relativeCFrame
+			if jointName == "RootJoint" then
+				-- RootJoint links HumanoidRootPart to Torso correctly
+				relativeCFrame = humanRoot.CFrame:ToObjectSpace(torso.CFrame)
+			else
+				relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
+			end
 			joints[jointName] = relativeCFrame
 		end
 	end
@@ -168,6 +175,15 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 	if currentLoadedPoseIdentifier == poseIdentifier then
 		unloadPose(character)
 		return
+	end
+
+	-- Check HP Trigger Conditions before applying
+	local trigger = poseEntry.Trigger
+	if trigger and trigger.Enabled then
+		local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
+		if hpPercent < trigger.MinHP or hpPercent > trigger.MaxHP then
+			return
+		end
 	end
 
 	if activePoseLoop then
@@ -218,7 +234,6 @@ RunService.Stepped:Connect(function()
 		for poseName, poseEntry in pairs(poses) do
 			local trig = poseEntry.Trigger
 			if trig and trig.Enabled then
-				-- Check if health falls within MinHP and MaxHP range
 				if hpPercent >= trig.MinHP and hpPercent <= trig.MaxHP then
 					targetPoseToLoad = poseEntry
 					targetPoseId = folderName .. "/" .. poseName
@@ -229,14 +244,11 @@ RunService.Stepped:Connect(function()
 		if targetPoseToLoad then break end
 	end
 
-	-- Handle automatic switching/loading/unloading based on triggers
 	if targetPoseToLoad then
 		if currentLoadedPoseIdentifier ~= targetPoseId then
 			applyPoseData(char, targetPoseToLoad, targetPoseId)
 		end
 	else
-		-- If a pose was loaded via trigger, but health went out of range, unload it
-		-- (Manual loads without triggers enabled will stay until manually unloaded)
 		if currentLoadedPoseIdentifier then
 			local foundFolder, foundName = currentLoadedPoseIdentifier:match("^([^/]+)/(.+)$")
 			if foundFolder and SavedFolders[foundFolder] and SavedFolders[foundFolder][foundName] then
@@ -828,4 +840,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("xO02O02O02ak")
+print("xdm3wedidit9ak")
