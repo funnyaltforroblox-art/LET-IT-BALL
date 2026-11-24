@@ -42,7 +42,107 @@ local extractedDuplicateCounter = 0
 local refreshList -- forward declaration
 
 ----------------------------------------------------
--- TEXTURE, SIZE & FORM HELPERS (FROM ACESS2)
+-- FOLDER & SUBFOLDER PATH HELPERS
+----------------------------------------------------
+
+local function normalizeFolderPath(rawPath)
+	local cleaned = tostring(rawPath or ""):gsub("\\", "/")
+	local parts = {}
+	for segment in string.gmatch(cleaned, "[^/]+") do
+		local trimmed = segment:match("^%s*(.-)%s*$")
+		if trimmed ~= "" then
+			table.insert(parts, trimmed)
+		end
+	end
+	if #parts == 0 then
+		return "Default"
+	end
+	return table.concat(parts, "/")
+end
+
+local function ensureFolderHierarchy(folderPath)
+	local normalized = normalizeFolderPath(folderPath)
+	local parts = {}
+	for segment in string.gmatch(normalized, "[^/]+") do
+		table.insert(parts, segment)
+		local currentPath = table.concat(parts, "/")
+		if not SavedFolders[currentPath] then
+			SavedFolders[currentPath] = {}
+		end
+	end
+	return normalized
+end
+
+local function getFolderDepth(folderPath)
+	local depth = 0
+	for _ in string.gmatch(folderPath, "/") do
+		depth = depth + 1
+	end
+	return depth
+end
+
+local function getFolderDisplayName(folderPath)
+	local leaf = folderPath:match("([^/]+)$")
+	return leaf or folderPath
+end
+
+local function isAnyAncestorCollapsed(folderPath)
+	local parts = {}
+	for segment in string.gmatch(folderPath, "[^/]+") do
+		table.insert(parts, segment)
+	end
+	for i = 1, #parts - 1 do
+		local ancestorPath = table.concat(parts, "/", 1, i)
+		if CollapsedFolders[ancestorPath] then
+			return true
+		end
+	end
+	return false
+end
+
+local function getSortedFolderPaths()
+	local paths = {}
+	for folderPath in pairs(SavedFolders) do
+		table.insert(paths, folderPath)
+	end
+	table.sort(paths, function(a, b)
+		if a == "Default" and b ~= "Default" then return true end
+		if b == "Default" and a ~= "Default" then return false end
+		return a:lower() < b:lower()
+	end)
+	return paths
+end
+
+local function deleteFolderAndSubfolders(targetFolderPath)
+	if targetFolderPath == "Default" then return end
+	local prefix = targetFolderPath .. "/"
+	local toRemove = {}
+
+	for folderPath in pairs(SavedFolders) do
+		if folderPath == targetFolderPath or folderPath:sub(1, #prefix) == prefix then
+			table.insert(toRemove, folderPath)
+		end
+	end
+
+	for _, path in ipairs(toRemove) do
+		if currentLoadedPoseIdentifier and currentLoadedPoseIdentifier:sub(1, #path + 1) == (path .. "/") then
+			if LocalPlayer.Character then
+				-- Will unload active pose if it belonged to deleted folder
+				if activePoseLoop then
+					activePoseLoop:Disconnect()
+					activePoseLoop = nil
+				end
+				currentLoadedPoseIdentifier = nil
+				currentLoadedPoseEntry = nil
+			end
+		end
+		SavedFolders[path] = nil
+		CollapsedFolders[path] = nil
+	end
+end
+
+----------------------------------------------------
+-- TEXTURE, SIZE & FORM HELPERS
 ----------------------------------------------------
 
 local function normalizeAssetId(val)
@@ -81,7 +181,6 @@ end
 
 local function getStaticAnchorPart(character)
 	if not character then return nil end
-	-- Use HumanoidRootPart (or Head fallback) so Torso pose rotations do not distort static accessory form
 	return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
 end
 
@@ -215,12 +314,12 @@ local function loadPosesFromFile()
 		local content = readfile(FILE_NAME)
 		local decoded = HttpService:JSONDecode(content)
 		if decoded then
-			SavedFolders = {}
+			SavedFolders = { ["Default"] = {} }
 			for folderName, poses in pairs(decoded) do
-				SavedFolders[folderName] = {}
+				local normFolder = ensureFolderHierarchy(folderName)
 				for poseName, poseData in pairs(poses) do
 					local savedTrigger = poseData.Trigger or {}
-					SavedFolders[folderName][poseName] = {
+					SavedFolders[normFolder][poseName] = {
 						Joints = {},
 						Exclusions = poseData.Exclusions or {},
 						IncludedObjects = deserializeIncludedObjects(poseData.IncludedObjects),
@@ -234,7 +333,7 @@ local function loadPosesFromFile()
 					local rawJoints = poseData.Joints or poseData
 					for jointName, cfTbl in pairs(rawJoints) do
 						if jointName ~= "Exclusions" and jointName ~= "Trigger" and jointName ~= "IncludedObjects" and jointName ~= "AnimOrder" then
-							SavedFolders[folderName][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
+							SavedFolders[normFolder][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
 						end
 					end
 				end
@@ -446,7 +545,6 @@ local function spawnIncludedObjects(character, includedObjects)
 		})
 	end
 
-	-- Keep extracted accessories attached while preserving exact static form during movement & Torso poses
 	activeObjectsFollowLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			clearSpawnedPoseObjects()
@@ -512,7 +610,6 @@ local function extractPoseData(character)
 		if limb and joint and joint:IsA("Motor6D") then
 			local relativeCFrame
 			if jointName == "RootJoint" then
-				-- RootJoint links HumanoidRootPart to Torso correctly
 				relativeCFrame = humanRoot.CFrame:ToObjectSpace(torso.CFrame)
 			else
 				relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
@@ -543,7 +640,6 @@ local function applyPoseData(character, poseEntry, poseIdentifier, forceApply)
 		return
 	end
 
-	-- Check HP Trigger Conditions before applying
 	local trigger = poseEntry.Trigger
 	if trigger and trigger.Enabled then
 		local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
@@ -581,6 +677,44 @@ local function applyPoseData(character, poseEntry, poseIdentifier, forceApply)
 			end
 		end
 	end)
+end
+
+local function movePoseToFolder(sourceFolderPath, poseName, targetFolderRaw)
+	if not SavedFolders[sourceFolderPath] or not SavedFolders[sourceFolderPath][poseName] then
+		return false
+	end
+
+	local targetFolderPath = ensureFolderHierarchy(targetFolderRaw)
+	if targetFolderPath == sourceFolderPath then
+		return true
+	end
+
+	local entry = SavedFolders[sourceFolderPath][poseName]
+	local finalPoseName = poseName
+
+	-- Avoid overwriting an existing pose with the same name in target folder
+	if SavedFolders[targetFolderPath][finalPoseName] then
+		local suffix = 2
+		while SavedFolders[targetFolderPath][poseName .. "_" .. tostring(suffix)] do
+			suffix = suffix + 1
+		end
+		finalPoseName = poseName .. "_" .. tostring(suffix)
+	end
+
+	SavedFolders[targetFolderPath][finalPoseName] = entry
+	SavedFolders[sourceFolderPath][poseName] = nil
+
+	local oldId = sourceFolderPath .. "/" .. poseName
+	local newId = targetFolderPath .. "/" .. finalPoseName
+	if currentLoadedPoseIdentifier == oldId then
+		currentLoadedPoseIdentifier = newId
+	end
+
+	savePosesToFile()
+	if refreshList then
+		refreshList()
+	end
+	return true
 end
 
 ----------------------------------------------------
@@ -701,7 +835,6 @@ RunService.Stepped:Connect(function()
 	local targetPoseToLoad = nil
 	local targetPoseId = nil
 
-	-- Scan all saved poses for active triggers matching current health range
 	for folderName, poses in pairs(SavedFolders) do
 		for poseName, poseEntry in pairs(poses) do
 			local trig = poseEntry.Trigger
@@ -722,7 +855,7 @@ RunService.Stepped:Connect(function()
 		end
 	else
 		if currentLoadedPoseIdentifier then
-			local foundFolder, foundName = currentLoadedPoseIdentifier:match("^([^/]+)/(.+)$")
+			local foundFolder, foundName = currentLoadedPoseIdentifier:match("^(.+)/([^/]+)$")
 			if foundFolder and SavedFolders[foundFolder] and SavedFolders[foundFolder][foundName] then
 				local activeEntry = SavedFolders[foundFolder][foundName]
 				if activeEntry.Trigger and activeEntry.Trigger.Enabled then
@@ -954,7 +1087,7 @@ delayInput.FocusLost:Connect(function()
 	end
 end)
 
--- Input Controls
+-- Input Controls (Folder/Subfolder creation + Pose creation)
 local inputFrame = Instance.new("Frame")
 inputFrame.Size = UDim2.new(0.9, 0, 0, 110)
 inputFrame.Position = UDim2.new(0.05, 0, 0, 68)
@@ -962,15 +1095,41 @@ inputFrame.BackgroundTransparency = 1
 inputFrame.Parent = mainFrame
 
 local folderInput = Instance.new("TextBox")
-folderInput.Size = UDim2.new(1, 0, 0, 30)
+folderInput.Size = UDim2.new(0.70, -3, 0, 30)
 folderInput.Position = UDim2.new(0, 0, 0, 0)
 folderInput.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
 folderInput.Text = ""
-folderInput.PlaceholderText = "Folder Name (e.g., Default)"
+folderInput.PlaceholderText = "Folder or Folder/Subfolder"
 folderInput.TextColor3 = Color3.fromRGB(255, 255, 255)
 folderInput.Font = Enum.Font.SourceSans
-folderInput.TextSize = 14
+folderInput.TextSize = 13
 folderInput.Parent = inputFrame
+
+local createFolderBtn = Instance.new("TextButton")
+createFolderBtn.Name = "CreateFolderBtn"
+createFolderBtn.Size = UDim2.new(0.30, -3, 0, 30)
+createFolderBtn.Position = UDim2.new(0.70, 6, 0, 0)
+createFolderBtn.BackgroundColor3 = Color3.fromRGB(185, 135, 25)
+createFolderBtn.Text = "+ Folder"
+createFolderBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+createFolderBtn.Font = Enum.Font.SourceSansBold
+createFolderBtn.TextSize = 13
+createFolderBtn.Parent = inputFrame
+
+local createFolderCorner = Instance.new("UICorner")
+createFolderCorner.CornerRadius = UDim.new(0, 5)
+createFolderCorner.Parent = createFolderBtn
+
+createFolderBtn.MouseButton1Click:Connect(function()
+	local rawFolder = folderInput.Text
+	if rawFolder:match("^%s*$") then return end
+	local createdPath = ensureFolderHierarchy(rawFolder)
+	folderInput.Text = createdPath
+	savePosesToFile()
+	if refreshList then
+		refreshList()
+	end
+end)
 
 local poseInput = Instance.new("TextBox")
 poseInput.Size = UDim2.new(1, 0, 0, 30)
@@ -1077,7 +1236,7 @@ animationBtn.MouseButton1Click:Connect(function()
 end)
 
 ----------------------------------------------------
--- SETTINGS POPUP MODAL
+-- SETTINGS & MOVE POSE POPUP MODAL
 ----------------------------------------------------
 
 local function openPoseSettings(folderName, poseName, poseEntry)
@@ -1116,6 +1275,78 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	modalTitle.TextSize = 16
 	modalTitle.ZIndex = 12
 	modalTitle.Parent = modalBox
+
+	-- Section 0: Move Pose to Folder / Subfolder
+	local moveDesc = Instance.new("TextLabel")
+	moveDesc.Size = UDim2.new(1, 0, 0, 22)
+	moveDesc.BackgroundTransparency = 1
+	moveDesc.Text = "Move Pose to Folder / Subfolder:"
+	moveDesc.TextColor3 = Color3.fromRGB(255, 215, 90)
+	moveDesc.Font = Enum.Font.SourceSansBold
+	moveDesc.TextSize = 12
+	moveDesc.TextXAlignment = Enum.TextXAlignment.Left
+	moveDesc.ZIndex = 12
+	moveDesc.Parent = modalBox
+
+	local moveRow = Instance.new("Frame")
+	moveRow.Size = UDim2.new(1, 0, 0, 28)
+	moveRow.BackgroundTransparency = 1
+	moveRow.ZIndex = 13
+	moveRow.Parent = modalBox
+
+	local moveTargetBox = Instance.new("TextBox")
+	moveTargetBox.Size = UDim2.new(0.68, 0, 1, 0)
+	moveTargetBox.Position = UDim2.new(0.02, 0, 0, 0)
+	moveTargetBox.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+	moveTargetBox.Text = folderName
+	moveTargetBox.PlaceholderText = "Folder/Subfolder"
+	moveTargetBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+	moveTargetBox.Font = Enum.Font.SourceSans
+	moveTargetBox.TextSize = 12
+	moveTargetBox.ZIndex = 14
+	moveTargetBox.Parent = moveRow
+
+	local moveConfirmBtn = Instance.new("TextButton")
+	moveConfirmBtn.Size = UDim2.new(0.26, 0, 1, 0)
+	moveConfirmBtn.Position = UDim2.new(0.72, 0, 0, 0)
+	moveConfirmBtn.BackgroundColor3 = Color3.fromRGB(0, 135, 195)
+	moveConfirmBtn.Text = "Move"
+	moveConfirmBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	moveConfirmBtn.Font = Enum.Font.SourceSansBold
+	moveConfirmBtn.TextSize = 12
+	moveConfirmBtn.ZIndex = 14
+	moveConfirmBtn.Parent = moveRow
+
+	moveConfirmBtn.MouseButton1Click:Connect(function()
+		local destination = moveTargetBox.Text
+		if destination and destination:match("%S") then
+			if movePoseToFolder(folderName, poseName, destination) then
+				modal:Destroy()
+			end
+		end
+	end)
+
+	-- Quick-Pick Existing Folders & Subfolders
+	for _, existingPath in ipairs(getSortedFolderPaths()) do
+		if existingPath ~= folderName then
+			local quickFolderBtn = Instance.new("TextButton")
+			quickFolderBtn.Size = UDim2.new(0.96, 0, 0, 22)
+			quickFolderBtn.BackgroundColor3 = Color3.fromRGB(38, 42, 54)
+			quickFolderBtn.Text = "  ↳ Move to: " .. existingPath
+			quickFolderBtn.TextColor3 = Color3.fromRGB(200, 225, 255)
+			quickFolderBtn.TextXAlignment = Enum.TextXAlignment.Left
+			quickFolderBtn.Font = Enum.Font.SourceSans
+			quickFolderBtn.TextSize = 12
+			quickFolderBtn.ZIndex = 14
+			quickFolderBtn.Parent = modalBox
+
+			quickFolderBtn.MouseButton1Click:Connect(function()
+				if movePoseToFolder(folderName, poseName, existingPath) then
+					modal:Destroy()
+				end
+			end)
+		end
+	end
 
 	-- Section 1: Part Exclusions
 	local desc = Instance.new("TextLabel")
@@ -1324,9 +1555,6 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 
 		if SavedFolders[folderName] then
 			SavedFolders[folderName][poseName] = nil
-			if next(SavedFolders[folderName]) == nil and folderName ~= "Default" then
-				SavedFolders[folderName] = nil
-			end
 			savePosesToFile()
 			modal:Destroy()
 			refreshList()
@@ -1364,157 +1592,220 @@ refreshList = function()
 		end
 	end
 
-	for folderName, poses in pairs(SavedFolders) do
-		local isCollapsed = CollapsedFolders[folderName] or false
+	for _, folderName in ipairs(getSortedFolderPaths()) do
+		local poses = SavedFolders[folderName] or {}
+		if not isAnyAncestorCollapsed(folderName) then
+			local isCollapsed = CollapsedFolders[folderName] or false
+			local depth = getFolderDepth(folderName)
+			local indentSpaces = string.rep("   ", depth)
+			local leafLabel = getFolderDisplayName(folderName)
 
-		local folderHeader = Instance.new("TextButton")
-		folderHeader.Size = UDim2.new(1, -8, 0, 25)
-		folderHeader.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-		folderHeader.Text = (isCollapsed and " ▶ 📁 " or " ▼ 📁 ") .. folderName
-		folderHeader.TextColor3 = Color3.fromRGB(255, 215, 0)
-		folderHeader.TextXAlignment = Enum.TextXAlignment.Left
-		folderHeader.Font = Enum.Font.SourceSansBold
-		folderHeader.TextSize = 14
-		folderHeader.Parent = scrollList
+			local folderHeaderRow = Instance.new("Frame")
+			folderHeaderRow.Size = UDim2.new(1, -8, 0, 25)
+			folderHeaderRow.BackgroundColor3 = depth > 0 and Color3.fromRGB(38, 42, 54) or Color3.fromRGB(45, 45, 55)
+			folderHeaderRow.Parent = scrollList
 
-		folderHeader.MouseButton1Click:Connect(function()
-			CollapsedFolders[folderName] = not isCollapsed
-			refreshList()
-		end)
+			local folderHeader = Instance.new("TextButton")
+			folderHeader.Size = UDim2.new(folderName ~= "Default" and 0.72 or 1, 0, 1, 0)
+			folderHeader.BackgroundTransparency = 1
+			folderHeader.Text = indentSpaces .. (isCollapsed and " ▶ 📁 " or " ▼ 📁 ") .. leafLabel
+			folderHeader.TextColor3 = depth > 0 and Color3.fromRGB(160, 220, 255) or Color3.fromRGB(255, 215, 0)
+			folderHeader.TextXAlignment = Enum.TextXAlignment.Left
+			folderHeader.Font = Enum.Font.SourceSansBold
+			folderHeader.TextSize = 13
+			folderHeader.TextTruncate = Enum.TextTruncate.AtEnd
+			folderHeader.Parent = folderHeaderRow
 
-		if not isCollapsed then
-			for poseName, poseEntry in pairs(poses) do
-				local poseIdentifier = folderName .. "/" .. poseName
-				local isCurrentlyLoaded = (currentLoadedPoseIdentifier == poseIdentifier)
-				local objCount = poseEntry.IncludedObjects and #poseEntry.IncludedObjects or 0
+			folderHeader.MouseButton1Click:Connect(function()
+				CollapsedFolders[folderName] = not isCollapsed
+				refreshList()
+			end)
 
-				local poseItem = Instance.new("Frame")
-				poseItem.Size = UDim2.new(1, -8, 0, 30)
-				poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
-				poseItem.Parent = scrollList
+			-- Quick "+Sub" button on every folder to prefill subfolder path
+			local addSubBtn = Instance.new("TextButton")
+			addSubBtn.Size = UDim2.new(0.15, 0, 0.8, 0)
+			addSubBtn.Position = UDim2.new(folderName ~= "Default" and 0.73 or 0.83, 0, 0.1, 0)
+			addSubBtn.BackgroundColor3 = Color3.fromRGB(65, 95, 130)
+			addSubBtn.Text = "+Sub"
+			addSubBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			addSubBtn.Font = Enum.Font.SourceSansBold
+			addSubBtn.TextSize = 11
+			addSubBtn.Parent = folderHeaderRow
 
-				local nameWidth = animationModeEnabled and 0.29 or 0.40
-				local loadX = animationModeEnabled and 0.30 or 0.41
-				local loadW = animationModeEnabled and 0.18 or 0.20
-				local orderX = 0.49
-				local orderW = 0.11
-				local settingsX = animationModeEnabled and 0.61 or 0.62
-				local settingsW = animationModeEnabled and 0.15 or 0.17
-				local exportX = animationModeEnabled and 0.77 or 0.80
-				local exportW = animationModeEnabled and 0.21 or 0.18
+			local subCorner = Instance.new("UICorner")
+			subCorner.CornerRadius = UDim.new(0, 4)
+			subCorner.Parent = addSubBtn
 
-				local poseNameLabel = Instance.new("TextLabel")
-				poseNameLabel.Size = UDim2.new(nameWidth, 0, 1, 0)
-				poseNameLabel.BackgroundTransparency = 1
-				poseNameLabel.Text = "   " .. poseName .. (objCount > 0 and (" [" .. objCount .. " acc]") or "")
-				poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
-				poseNameLabel.TextXAlignment = Enum.TextXAlignment.Left
-				poseNameLabel.Font = Enum.Font.SourceSans
-				poseNameLabel.TextSize = 13
-				poseNameLabel.TextTruncate = Enum.TextTruncate.AtEnd
-				poseNameLabel.Parent = poseItem
+			addSubBtn.MouseButton1Click:Connect(function()
+				folderInput.Text = folderName .. "/"
+				folderInput:CaptureFocus()
+			end)
 
-				local loadBtn = Instance.new("TextButton")
-				loadBtn.Size = UDim2.new(loadW, 0, 0.8, 0)
-				loadBtn.Position = UDim2.new(loadX, 0, 0.1, 0)
-				loadBtn.BackgroundColor3 = isCurrentlyLoaded and Color3.fromRGB(180, 50, 50) or Color3.fromRGB(0, 120, 215)
-				loadBtn.Text = isCurrentlyLoaded and "Unload" or "Load"
-				loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-				loadBtn.Font = Enum.Font.SourceSansBold
-				loadBtn.TextSize = 12
-				loadBtn.Parent = poseItem
+			if folderName ~= "Default" then
+				local delFolderBtn = Instance.new("TextButton")
+				delFolderBtn.Size = UDim2.new(0.10, 0, 0.8, 0)
+				delFolderBtn.Position = UDim2.new(0.89, 0, 0.1, 0)
+				delFolderBtn.BackgroundColor3 = Color3.fromRGB(165, 45, 45)
+				delFolderBtn.Text = "X"
+				delFolderBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+				delFolderBtn.Font = Enum.Font.SourceSansBold
+				delFolderBtn.TextSize = 11
+				delFolderBtn.Parent = folderHeaderRow
 
-				local btnCorner1 = Instance.new("UICorner")
-				btnCorner1.CornerRadius = UDim.new(0, 4)
-				btnCorner1.Parent = loadBtn
+				local delFCorner = Instance.new("UICorner")
+				delFCorner.CornerRadius = UDim.new(0, 4)
+				delFCorner.Parent = delFolderBtn
 
-				loadBtn.MouseButton1Click:Connect(function()
-					if LocalPlayer.Character then
-						applyPoseData(LocalPlayer.Character, poseEntry, poseIdentifier)
-						refreshList()
-					end
+				delFolderBtn.MouseButton1Click:Connect(function()
+					deleteFolderAndSubfolders(folderName)
+					savePosesToFile()
+					refreshList()
+				end)
+			end
+
+			if not isCollapsed then
+				local sortedPoseNames = {}
+				for pName in pairs(poses) do
+					table.insert(sortedPoseNames, pName)
+				end
+				table.sort(sortedPoseNames, function(a, b)
+					return a:lower() < b:lower()
 				end)
 
-				if animationModeEnabled then
-					local orderBox = Instance.new("TextBox")
-					orderBox.Name = "AnimOrderBox"
-					orderBox.Size = UDim2.new(orderW, 0, 0.8, 0)
-					orderBox.Position = UDim2.new(orderX, 0, 0.1, 0)
-					orderBox.BackgroundColor3 = Color3.fromRGB(50, 45, 70)
-					orderBox.Text = poseEntry.AnimOrder and tostring(poseEntry.AnimOrder) or ""
-					orderBox.PlaceholderText = "#"
-					orderBox.TextColor3 = Color3.fromRGB(255, 240, 150)
-					orderBox.Font = Enum.Font.SourceSansBold
-					orderBox.TextSize = 12
-					orderBox.Parent = poseItem
+				for _, poseName in ipairs(sortedPoseNames) do
+					local poseEntry = poses[poseName]
+					local poseIdentifier = folderName .. "/" .. poseName
+					local isCurrentlyLoaded = (currentLoadedPoseIdentifier == poseIdentifier)
+					local objCount = poseEntry.IncludedObjects and #poseEntry.IncludedObjects or 0
 
-					local orderCorner = Instance.new("UICorner")
-					orderCorner.CornerRadius = UDim.new(0, 4)
-					orderCorner.Parent = orderBox
+					local poseItem = Instance.new("Frame")
+					poseItem.Size = UDim2.new(1, -8, 0, 30)
+					poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
+					poseItem.Parent = scrollList
 
-					orderBox.FocusLost:Connect(function()
-						local trimmed = string.gsub(orderBox.Text or "", "^%s*(.-)%s*$", "%1")
-						local num = tonumber(trimmed)
-						if num and num >= 1 then
-							poseEntry.AnimOrder = math.floor(num)
-							orderBox.Text = tostring(poseEntry.AnimOrder)
-						else
-							poseEntry.AnimOrder = nil
-							orderBox.Text = ""
+					local nameWidth = animationModeEnabled and 0.29 or 0.40
+					local loadX = animationModeEnabled and 0.30 or 0.41
+					local loadW = animationModeEnabled and 0.18 or 0.20
+					local orderX = 0.49
+					local orderW = 0.11
+					local settingsX = animationModeEnabled and 0.61 or 0.62
+					local settingsW = animationModeEnabled and 0.15 or 0.17
+					local exportX = animationModeEnabled and 0.77 or 0.80
+					local exportW = animationModeEnabled and 0.21 or 0.18
+
+					local poseNameLabel = Instance.new("TextLabel")
+					poseNameLabel.Size = UDim2.new(nameWidth, 0, 1, 0)
+					poseNameLabel.BackgroundTransparency = 1
+					poseNameLabel.Text = indentSpaces .. "   " .. poseName .. (objCount > 0 and (" [" .. objCount .. " acc]") or "")
+					poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+					poseNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+					poseNameLabel.Font = Enum.Font.SourceSans
+					poseNameLabel.TextSize = 13
+					poseNameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+					poseNameLabel.Parent = poseItem
+
+					local loadBtn = Instance.new("TextButton")
+					loadBtn.Size = UDim2.new(loadW, 0, 0.8, 0)
+					loadBtn.Position = UDim2.new(loadX, 0, 0.1, 0)
+					loadBtn.BackgroundColor3 = isCurrentlyLoaded and Color3.fromRGB(180, 50, 50) or Color3.fromRGB(0, 120, 215)
+					loadBtn.Text = isCurrentlyLoaded and "Unload" or "Load"
+					loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+					loadBtn.Font = Enum.Font.SourceSansBold
+					loadBtn.TextSize = 12
+					loadBtn.Parent = poseItem
+
+					local btnCorner1 = Instance.new("UICorner")
+					btnCorner1.CornerRadius = UDim.new(0, 4)
+					btnCorner1.Parent = loadBtn
+
+					loadBtn.MouseButton1Click:Connect(function()
+						if LocalPlayer.Character then
+							applyPoseData(LocalPlayer.Character, poseEntry, poseIdentifier)
+							refreshList()
 						end
-						savePosesToFile()
-						if animationModeEnabled then
-							startAnimationSequence()
+					end)
+
+					if animationModeEnabled then
+						local orderBox = Instance.new("TextBox")
+						orderBox.Name = "AnimOrderBox"
+						orderBox.Size = UDim2.new(orderW, 0, 0.8, 0)
+						orderBox.Position = UDim2.new(orderX, 0, 0.1, 0)
+						orderBox.BackgroundColor3 = Color3.fromRGB(50, 45, 70)
+						orderBox.Text = poseEntry.AnimOrder and tostring(poseEntry.AnimOrder) or ""
+						orderBox.PlaceholderText = "#"
+						orderBox.TextColor3 = Color3.fromRGB(255, 240, 150)
+						orderBox.Font = Enum.Font.SourceSansBold
+						orderBox.TextSize = 12
+						orderBox.Parent = poseItem
+
+						local orderCorner = Instance.new("UICorner")
+						orderCorner.CornerRadius = UDim.new(0, 4)
+						orderCorner.Parent = orderBox
+
+						orderBox.FocusLost:Connect(function()
+							local trimmed = string.gsub(orderBox.Text or "", "^%s*(.-)%s*$", "%1")
+							local num = tonumber(trimmed)
+							if num and num >= 1 then
+								poseEntry.AnimOrder = math.floor(num)
+								orderBox.Text = tostring(poseEntry.AnimOrder)
+							else
+								poseEntry.AnimOrder = nil
+								orderBox.Text = ""
+							end
+							savePosesToFile()
+							if animationModeEnabled then
+								startAnimationSequence()
+							end
+						end)
+					end
+
+					local settingsBtn = Instance.new("TextButton")
+					settingsBtn.Size = UDim2.new(settingsW, 0, 0.8, 0)
+					settingsBtn.Position = UDim2.new(settingsX, 0, 0.1, 0)
+					settingsBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 95)
+					settingsBtn.Text = "⚙️"
+					settingsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+					settingsBtn.Font = Enum.Font.SourceSansBold
+					settingsBtn.TextSize = 12
+					settingsBtn.Parent = poseItem
+
+					local btnCorner2 = Instance.new("UICorner")
+					btnCorner2.CornerRadius = UDim.new(0, 4)
+					btnCorner2.Parent = settingsBtn
+
+					settingsBtn.MouseButton1Click:Connect(function()
+						openPoseSettings(folderName, poseName, poseEntry)
+					end)
+
+					local exportBtn = Instance.new("TextButton")
+					exportBtn.Size = UDim2.new(exportW, 0, 0.8, 0)
+					exportBtn.Position = UDim2.new(exportX, 0, 0.1, 0)
+					exportBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
+					exportBtn.Text = "Export"
+					exportBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+					exportBtn.Font = Enum.Font.SourceSansBold
+					exportBtn.TextSize = 11
+					exportBtn.Parent = poseItem
+
+					local btnCorner3 = Instance.new("UICorner")
+					btnCorner3.CornerRadius = UDim.new(0, 4)
+					btnCorner3.Parent = exportBtn
+
+					exportBtn.MouseButton1Click:Connect(function()
+						local exportString = "\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---\n"
+						exportString = exportString .. "local " .. poseName .. " = {\n"
+						for joint, cf in pairs(poseEntry.Joints) do
+							local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
+							exportString = exportString .. string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),\n', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
 						end
+						exportString = exportString .. "}\n--------------------------"
+						
+						print(exportString)
+						pcall(function()
+							setclipboard(exportString)
+						end)
 					end)
 				end
-
-				local settingsBtn = Instance.new("TextButton")
-				settingsBtn.Size = UDim2.new(settingsW, 0, 0.8, 0)
-				settingsBtn.Position = UDim2.new(settingsX, 0, 0.1, 0)
-				settingsBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 95)
-				settingsBtn.Text = "⚙️"
-				settingsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-				settingsBtn.Font = Enum.Font.SourceSansBold
-				settingsBtn.TextSize = 12
-				settingsBtn.Parent = poseItem
-
-				local btnCorner2 = Instance.new("UICorner")
-				btnCorner2.CornerRadius = UDim.new(0, 4)
-				btnCorner2.Parent = settingsBtn
-
-				settingsBtn.MouseButton1Click:Connect(function()
-					openPoseSettings(folderName, poseName, poseEntry)
-				end)
-
-				local exportBtn = Instance.new("TextButton")
-				exportBtn.Size = UDim2.new(exportW, 0, 0.8, 0)
-				exportBtn.Position = UDim2.new(exportX, 0, 0.1, 0)
-				exportBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
-				exportBtn.Text = "Export"
-				exportBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-				exportBtn.Font = Enum.Font.SourceSansBold
-				exportBtn.TextSize = 11
-				exportBtn.Parent = poseItem
-
-				local btnCorner3 = Instance.new("UICorner")
-				btnCorner3.CornerRadius = UDim.new(0, 4)
-				btnCorner3.Parent = exportBtn
-
-				exportBtn.MouseButton1Click:Connect(function()
-					local exportString = "\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---\n"
-					exportString = exportString .. "local " .. poseName .. " = {\n"
-					for joint, cf in pairs(poseEntry.Joints) do
-						local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
-						exportString = exportString .. string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),\n', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
-					end
-					exportString = exportString .. "}\n--------------------------"
-					
-					print(exportString)
-					pcall(function()
-						setclipboard(exportString)
-					end)
-				end)
 			end
 		end
 	end
@@ -1532,7 +1823,7 @@ toggleBtn.MouseButton1Click:Connect(function()
 end)
 
 saveBtn.MouseButton1Click:Connect(function()
-	local folderInputText = folderInput.Text ~= "" and folderInput.Text or "Default"
+	local folderInputText = ensureFolderHierarchy(folderInput.Text)
 	local poseInputText = poseInput.Text ~= "" and poseInput.Text or ("Pose_" .. tostring(tick()):sub(5, 8))
 
 	local char = LocalPlayer.Character
@@ -1540,9 +1831,6 @@ saveBtn.MouseButton1Click:Connect(function()
 
 	local poseData = extractPoseData(char)
 	if poseData then
-		if not SavedFolders[folderInputText] then
-			SavedFolders[folderInputText] = {}
-		end
 		SavedFolders[folderInputText][poseInputText] = poseData
 
 		poseInput.Text = ""
