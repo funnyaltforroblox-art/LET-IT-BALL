@@ -20,18 +20,25 @@ local R6_LIMB_MAP = {
 local FOLDER_NAME = "R6PoseManager"
 local FILE_NAME = FOLDER_NAME .. "/SavedPoses.json"
 
--- Pose Database, Object Toggle & Folder State
+-- Pose Database, Object Toggle, Animation State & Folder State
 local SavedFolders = {
 	["Default"] = {}
 }
 local CollapsedFolders = {}
 local includeObjectsEnabled = false
 
+local animationModeEnabled = false
+local animationDelaySeconds = 0.5
+local activeAnimationToken = 0
+local activeAnimationPlaying = false
+
 local activePoseLoop = nil
 local activeObjectsFollowLoop = nil
 local spawnedPoseObjects = {}
 local currentLoadedPoseIdentifier = nil 
 local currentLoadedPoseEntry = nil
+
+local refreshList -- forward declaration
 
 ----------------------------------------------------
 -- TEXTURE, SIZE & FORM HELPERS (FROM ACESS2)
@@ -179,6 +186,7 @@ local function savePosesToFile()
 					Joints = {},
 					Exclusions = poseData.Exclusions or {},
 					IncludedObjects = serializeIncludedObjects(poseData.IncludedObjects or {}),
+					AnimOrder = poseData.AnimOrder,
 					Trigger = {
 						Enabled = poseData.Trigger and poseData.Trigger.Enabled or false,
 						MinHP = poseData.Trigger and poseData.Trigger.MinHP or 0,
@@ -211,6 +219,7 @@ local function loadPosesFromFile()
 						Joints = {},
 						Exclusions = poseData.Exclusions or {},
 						IncludedObjects = deserializeIncludedObjects(poseData.IncludedObjects),
+						AnimOrder = tonumber(poseData.AnimOrder),
 						Trigger = {
 							Enabled = false, 
 							MinHP = savedTrigger.MinHP or 0,
@@ -219,7 +228,7 @@ local function loadPosesFromFile()
 					}
 					local rawJoints = poseData.Joints or poseData
 					for jointName, cfTbl in pairs(rawJoints) do
-						if jointName ~= "Exclusions" and jointName ~= "Trigger" and jointName ~= "IncludedObjects" then
+						if jointName ~= "Exclusions" and jointName ~= "Trigger" and jointName ~= "IncludedObjects" and jointName ~= "AnimOrder" then
 							SavedFolders[folderName][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
 						end
 					end
@@ -510,17 +519,18 @@ local function extractPoseData(character)
 		Joints = joints,
 		Exclusions = {},
 		IncludedObjects = capturedObjects,
+		AnimOrder = nil,
 		Trigger = { Enabled = false, MinHP = 0, MaxHP = 100 }
 	}
 end
 
-local function applyPoseData(character, poseEntry, poseIdentifier)
+local function applyPoseData(character, poseEntry, poseIdentifier, forceApply)
 	local torso = character:FindFirstChild("Torso")
 	local humanRoot = character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not torso or not humanRoot or not humanoid then return end
 
-	if currentLoadedPoseIdentifier == poseIdentifier then
+	if not forceApply and currentLoadedPoseIdentifier == poseIdentifier then
 		unloadPose(character)
 		return
 	end
@@ -566,9 +576,108 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 end
 
 ----------------------------------------------------
+-- ORDERED POSE ANIMATION RUNNER
+----------------------------------------------------
+
+local function stopAnimationSequence(resetPose)
+	activeAnimationToken = activeAnimationToken + 1
+	activeAnimationPlaying = false
+	if resetPose and LocalPlayer.Character then
+		unloadPose(LocalPlayer.Character)
+	end
+end
+
+local function getOrderedPoseSteps()
+	local steps = {}
+	for folderName, poses in pairs(SavedFolders) do
+		for poseName, poseEntry in pairs(poses) do
+			local orderNum = tonumber(poseEntry.AnimOrder)
+			if orderNum and orderNum >= 1 then
+				table.insert(steps, {
+					Order = math.floor(orderNum),
+					FolderName = folderName,
+					PoseName = poseName,
+					PoseEntry = poseEntry,
+					Identifier = folderName .. "/" .. poseName
+				})
+			end
+		end
+	end
+
+	table.sort(steps, function(a, b)
+		if a.Order ~= b.Order then
+			return a.Order < b.Order
+		end
+		if a.FolderName ~= b.FolderName then
+			return a.FolderName < b.FolderName
+		end
+		return a.PoseName < b.PoseName
+	end)
+
+	return steps
+end
+
+local function startAnimationSequence()
+	stopAnimationSequence(false)
+	local steps = getOrderedPoseSteps()
+	if #steps == 0 then return end
+
+	activeAnimationToken = activeAnimationToken + 1
+	local myToken = activeAnimationToken
+	activeAnimationPlaying = true
+
+	local finalOrder = steps[#steps].Order
+
+	task.spawn(function()
+		for _, step in ipairs(steps) do
+			if not animationModeEnabled or activeAnimationToken ~= myToken then
+				return
+			end
+
+			local char = LocalPlayer.Character
+			if not char or not char.Parent then
+				break
+			end
+
+			applyPoseData(char, step.PoseEntry, step.Identifier, true)
+			if refreshList then
+				refreshList()
+			end
+
+			local waitTime = math.max(0, tonumber(animationDelaySeconds) or 0)
+			local elapsed = 0
+			while elapsed < waitTime do
+				if not animationModeEnabled or activeAnimationToken ~= myToken then
+					return
+				end
+				local dt = task.wait(0.05)
+				elapsed = elapsed + dt
+			end
+
+			-- Reset cleanly after finishing the final ordered number
+			if step.Order == finalOrder then
+				break
+			end
+		end
+
+		if activeAnimationToken == myToken then
+			activeAnimationPlaying = false
+			if LocalPlayer.Character then
+				unloadPose(LocalPlayer.Character)
+			end
+			if refreshList then
+				refreshList()
+			end
+		end
+	end)
+end
+
+----------------------------------------------------
 -- BACKGROUND AUTOMATIC HP TRIGGER SCANNER
 ----------------------------------------------------
 RunService.Stepped:Connect(function()
+	if activeAnimationPlaying then return end
+
 	local char = LocalPlayer.Character
 	if not char then return end
 	local humanoid = char:FindFirstChildOfClass("Humanoid")
@@ -684,8 +793,8 @@ makeDraggable(toggleBtn)
 -- Main Frame
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
-mainFrame.Size = UDim2.new(0, 320, 0, 445)
-mainFrame.Position = UDim2.new(0.5, -160, 0.5, -222)
+mainFrame.Size = UDim2.new(0, 320, 0, 475)
+mainFrame.Position = UDim2.new(0.5, -160, 0.5, -237)
 mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 mainFrame.BorderSizePixel = 0
 mainFrame.Visible = false
@@ -708,15 +817,22 @@ title.Parent = mainFrame
 
 makeDraggable(mainFrame, title)
 
--- Top Checkbox: Include objects (player-attached accessories, static form)
+-- Top Row: Include objects button + Animation button next to it
+local topControlsRow = Instance.new("Frame")
+topControlsRow.Name = "TopControlsRow"
+topControlsRow.Size = UDim2.new(0.9, 0, 0, 26)
+topControlsRow.Position = UDim2.new(0.05, 0, 0, 34)
+topControlsRow.BackgroundTransparency = 1
+topControlsRow.Parent = mainFrame
+
 local includeObjectsBtn = Instance.new("TextButton")
 includeObjectsBtn.Name = "IncludeObjectsCheckbox"
-includeObjectsBtn.Size = UDim2.new(0.9, 0, 0, 26)
-includeObjectsBtn.Position = UDim2.new(0.05, 0, 0, 34)
+includeObjectsBtn.Size = UDim2.new(0.62, -3, 1, 0)
+includeObjectsBtn.Position = UDim2.new(0, 0, 0, 0)
 includeObjectsBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 48)
 includeObjectsBtn.BorderSizePixel = 0
 includeObjectsBtn.Text = ""
-includeObjectsBtn.Parent = mainFrame
+includeObjectsBtn.Parent = topControlsRow
 
 local incObjCorner = Instance.new("UICorner")
 incObjCorner.CornerRadius = UDim.new(0, 6)
@@ -737,20 +853,91 @@ incBoxCorner.CornerRadius = UDim.new(0, 4)
 incBoxCorner.Parent = includeObjectsBox
 
 local includeObjectsLabel = Instance.new("TextLabel")
-includeObjectsLabel.Size = UDim2.new(1, -34, 1, 0)
-includeObjectsLabel.Position = UDim2.new(0, 30, 0, 0)
+includeObjectsLabel.Size = UDim2.new(1, -30, 1, 0)
+includeObjectsLabel.Position = UDim2.new(0, 28, 0, 0)
 includeObjectsLabel.BackgroundTransparency = 1
-includeObjectsLabel.Text = "Include objects (player accessories)"
+includeObjectsLabel.Text = "Include objects"
 includeObjectsLabel.TextColor3 = Color3.fromRGB(225, 225, 235)
 includeObjectsLabel.TextXAlignment = Enum.TextXAlignment.Left
 includeObjectsLabel.Font = Enum.Font.SourceSansBold
 includeObjectsLabel.TextSize = 13
+includeObjectsLabel.TextTruncate = Enum.TextTruncate.AtEnd
 includeObjectsLabel.Parent = includeObjectsBtn
 
 includeObjectsBtn.MouseButton1Click:Connect(function()
 	includeObjectsEnabled = not includeObjectsEnabled
 	includeObjectsBox.Text = includeObjectsEnabled and "✓" or ""
 	includeObjectsBox.BackgroundColor3 = includeObjectsEnabled and Color3.fromRGB(0, 130, 70) or Color3.fromRGB(55, 55, 68)
+end)
+
+local animationBtn = Instance.new("TextButton")
+animationBtn.Name = "AnimationButton"
+animationBtn.Size = UDim2.new(0.38, -3, 1, 0)
+animationBtn.Position = UDim2.new(0.62, 6, 0, 0)
+animationBtn.BackgroundColor3 = Color3.fromRGB(75, 55, 115)
+animationBtn.BorderSizePixel = 0
+animationBtn.Text = "Animation"
+animationBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+animationBtn.Font = Enum.Font.SourceSansBold
+animationBtn.TextSize = 13
+animationBtn.Parent = topControlsRow
+
+local animBtnCorner = Instance.new("UICorner")
+animBtnCorner.CornerRadius = UDim.new(0, 6)
+animBtnCorner.Parent = animationBtn
+
+-- Delay (Seconds) Row (Created/shown when Animation is clicked)
+local delayRow = Instance.new("Frame")
+delayRow.Name = "DelayRow"
+delayRow.Size = UDim2.new(0.9, 0, 0, 26)
+delayRow.Position = UDim2.new(0.05, 0, 0, 64)
+delayRow.BackgroundColor3 = Color3.fromRGB(34, 34, 44)
+delayRow.BorderSizePixel = 0
+delayRow.Visible = false
+delayRow.Parent = mainFrame
+
+local delayRowCorner = Instance.new("UICorner")
+delayRowCorner.CornerRadius = UDim.new(0, 6)
+delayRowCorner.Parent = delayRow
+
+local delayLabel = Instance.new("TextLabel")
+delayLabel.Size = UDim2.new(0.58, 0, 1, 0)
+delayLabel.Position = UDim2.new(0, 8, 0, 0)
+delayLabel.BackgroundTransparency = 1
+delayLabel.Text = "Delay,(Seconds)"
+delayLabel.TextColor3 = Color3.fromRGB(220, 220, 235)
+delayLabel.TextXAlignment = Enum.TextXAlignment.Left
+delayLabel.Font = Enum.Font.SourceSansBold
+delayLabel.TextSize = 13
+delayLabel.Parent = delayRow
+
+local delayInput = Instance.new("TextBox")
+delayInput.Name = "DelaySecondsInput"
+delayInput.Size = UDim2.new(0.36, 0, 0.8, 0)
+delayInput.Position = UDim2.new(0.61, 0, 0.1, 0)
+delayInput.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+delayInput.Text = tostring(animationDelaySeconds)
+delayInput.PlaceholderText = "Sec"
+delayInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+delayInput.Font = Enum.Font.SourceSansBold
+delayInput.TextSize = 13
+delayInput.Parent = delayRow
+
+local delayInputCorner = Instance.new("UICorner")
+delayInputCorner.CornerRadius = UDim.new(0, 4)
+delayInputCorner.Parent = delayInput
+
+delayInput.FocusLost:Connect(function()
+	local parsed = tonumber(delayInput.Text)
+	if parsed and parsed >= 0 then
+		animationDelaySeconds = parsed
+		delayInput.Text = tostring(animationDelaySeconds)
+		if animationModeEnabled then
+			startAnimationSequence()
+		end
+	else
+		delayInput.Text = tostring(animationDelaySeconds)
+	end
 end)
 
 -- Input Controls
@@ -794,7 +981,7 @@ saveBtn.Parent = inputFrame
 
 -- Scrolling Frame (No bounce-back at bottom)
 local scrollList = Instance.new("ScrollingFrame")
-scrollList.Size = UDim2.new(0.9, 0, 0, 245)
+scrollList.Size = UDim2.new(0.9, 0, 0, 275)
 scrollList.Position = UDim2.new(0.05, 0, 0, 188)
 scrollList.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 scrollList.BorderSizePixel = 0
@@ -822,6 +1009,35 @@ end
 
 listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateScrollListCanvasSize)
 scrollList:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateScrollListCanvasSize)
+
+local function updateAnimationLayout()
+	delayRow.Visible = animationModeEnabled
+	if animationModeEnabled then
+		animationBtn.BackgroundColor3 = Color3.fromRGB(125, 75, 195)
+		inputFrame.Position = UDim2.new(0.05, 0, 0, 96)
+		scrollList.Position = UDim2.new(0.05, 0, 0, 214)
+		scrollList.Size = UDim2.new(0.9, 0, 0, 249)
+	else
+		animationBtn.BackgroundColor3 = Color3.fromRGB(75, 55, 115)
+		inputFrame.Position = UDim2.new(0.05, 0, 0, 68)
+		scrollList.Position = UDim2.new(0.05, 0, 0, 188)
+		scrollList.Size = UDim2.new(0.9, 0, 0, 275)
+	end
+	updateScrollListCanvasSize()
+end
+
+animationBtn.MouseButton1Click:Connect(function()
+	animationModeEnabled = not animationModeEnabled
+	updateAnimationLayout()
+	if refreshList then
+		refreshList()
+	end
+	if animationModeEnabled then
+		startAnimationSequence()
+	else
+		stopAnimationSequence(true)
+	end
+end)
 
 ----------------------------------------------------
 -- SETTINGS POPUP MODAL
@@ -1102,7 +1318,7 @@ end
 -- UI REFRESH LOGIC
 ----------------------------------------------------
 
-function refreshList()
+refreshList = function()
 	local prevCanvasPos = scrollList.CanvasPosition
 
 	for _, child in ipairs(scrollList:GetChildren()) do
@@ -1140,8 +1356,18 @@ function refreshList()
 				poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
 				poseItem.Parent = scrollList
 
+				local nameWidth = animationModeEnabled and 0.29 or 0.40
+				local loadX = animationModeEnabled and 0.30 or 0.41
+				local loadW = animationModeEnabled and 0.18 or 0.20
+				local orderX = 0.49
+				local orderW = 0.11
+				local settingsX = animationModeEnabled and 0.61 or 0.62
+				local settingsW = animationModeEnabled and 0.15 or 0.17
+				local exportX = animationModeEnabled and 0.77 or 0.80
+				local exportW = animationModeEnabled and 0.21 or 0.18
+
 				local poseNameLabel = Instance.new("TextLabel")
-				poseNameLabel.Size = UDim2.new(0.4, 0, 1, 0)
+				poseNameLabel.Size = UDim2.new(nameWidth, 0, 1, 0)
 				poseNameLabel.BackgroundTransparency = 1
 				poseNameLabel.Text = "   " .. poseName .. (objCount > 0 and (" [" .. objCount .. " acc]") or "")
 				poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
@@ -1152,8 +1378,8 @@ function refreshList()
 				poseNameLabel.Parent = poseItem
 
 				local loadBtn = Instance.new("TextButton")
-				loadBtn.Size = UDim2.new(0.2, 0, 0.8, 0)
-				loadBtn.Position = UDim2.new(0.41, 0, 0.1, 0)
+				loadBtn.Size = UDim2.new(loadW, 0, 0.8, 0)
+				loadBtn.Position = UDim2.new(loadX, 0, 0.1, 0)
 				loadBtn.BackgroundColor3 = isCurrentlyLoaded and Color3.fromRGB(180, 50, 50) or Color3.fromRGB(0, 120, 215)
 				loadBtn.Text = isCurrentlyLoaded and "Unload" or "Load"
 				loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -1172,9 +1398,43 @@ function refreshList()
 					end
 				end)
 
+				if animationModeEnabled then
+					local orderBox = Instance.new("TextBox")
+					orderBox.Name = "AnimOrderBox"
+					orderBox.Size = UDim2.new(orderW, 0, 0.8, 0)
+					orderBox.Position = UDim2.new(orderX, 0, 0.1, 0)
+					orderBox.BackgroundColor3 = Color3.fromRGB(50, 45, 70)
+					orderBox.Text = poseEntry.AnimOrder and tostring(poseEntry.AnimOrder) or ""
+					orderBox.PlaceholderText = "#"
+					orderBox.TextColor3 = Color3.fromRGB(255, 240, 150)
+					orderBox.Font = Enum.Font.SourceSansBold
+					orderBox.TextSize = 12
+					orderBox.Parent = poseItem
+
+					local orderCorner = Instance.new("UICorner")
+					orderCorner.CornerRadius = UDim.new(0, 4)
+					orderCorner.Parent = orderBox
+
+					orderBox.FocusLost:Connect(function()
+						local trimmed = string.gsub(orderBox.Text or "", "^%s*(.-)%s*$", "%1")
+						local num = tonumber(trimmed)
+						if num and num >= 1 then
+							poseEntry.AnimOrder = math.floor(num)
+							orderBox.Text = tostring(poseEntry.AnimOrder)
+						else
+							poseEntry.AnimOrder = nil
+							orderBox.Text = ""
+						end
+						savePosesToFile()
+						if animationModeEnabled then
+							startAnimationSequence()
+						end
+					end)
+				end
+
 				local settingsBtn = Instance.new("TextButton")
-				settingsBtn.Size = UDim2.new(0.17, 0, 0.8, 0)
-				settingsBtn.Position = UDim2.new(0.62, 0, 0.1, 0)
+				settingsBtn.Size = UDim2.new(settingsW, 0, 0.8, 0)
+				settingsBtn.Position = UDim2.new(settingsX, 0, 0.1, 0)
 				settingsBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 95)
 				settingsBtn.Text = "⚙️"
 				settingsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -1191,8 +1451,8 @@ function refreshList()
 				end)
 
 				local exportBtn = Instance.new("TextButton")
-				exportBtn.Size = UDim2.new(0.18, 0, 0.8, 0)
-				exportBtn.Position = UDim2.new(0.80, 0, 0.1, 0)
+				exportBtn.Size = UDim2.new(exportW, 0, 0.8, 0)
+				exportBtn.Position = UDim2.new(exportX, 0, 0.1, 0)
 				exportBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
 				exportBtn.Text = "Export"
 				exportBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -1257,5 +1517,6 @@ end)
 
 -- Load existing saved poses on startup
 loadPosesFromFile()
+updateAnimationLayout()
 refreshList()
-print("xdm3wedidit9aYes, we didk")
+print("xdm3wediditHOLYYYY9ak")
