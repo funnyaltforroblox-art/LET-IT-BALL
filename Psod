@@ -29,6 +29,7 @@ local CollapsedFolders = {}
 local includeObjectsEnabled = false
 
 local activePoseLoop = nil
+local activeObjectsFollowLoop = nil
 local spawnedPoseObjects = {}
 local currentLoadedPoseIdentifier = nil 
 local currentLoadedPoseEntry = nil
@@ -80,6 +81,12 @@ local function isPlayerCharacterDescendant(instance)
 	return false
 end
 
+local function getPositionAnchorPart(character)
+	if not character then return nil end
+	-- Prefer HumanoidRootPart position (never Torso, which rotates in poses)
+	return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head") or character:FindFirstChild("Torso")
+end
+
 ----------------------------------------------------
 -- FILE SYSTEM (DELTA WORKSPACE STORAGE)
 ----------------------------------------------------
@@ -94,16 +101,27 @@ local function deserializeCFrame(tbl)
 	return CFrame.new(unpack(tbl))
 end
 
+local function serializeVector3(v)
+	v = v or Vector3.zero
+	return {v.X, v.Y, v.Z}
+end
+
+local function deserializeVector3(tbl, fallback)
+	if type(tbl) ~= "table" then return fallback or Vector3.zero end
+	return Vector3.new(tbl[1] or 0, tbl[2] or 0, tbl[3] or 0)
+end
+
 local function serializeIncludedObjects(objectsList)
 	local out = {}
 	if type(objectsList) ~= "table" then return out end
 	for _, entry in ipairs(objectsList) do
 		local partsSerialized = {}
 		for partName, pInfo in pairs(entry.Parts or {}) do
+			local relOffset = pInfo.RelOffset or ((pInfo.WorldCFrame and pInfo.AnchorWorldPos) and (pInfo.WorldCFrame.Position - pInfo.AnchorWorldPos) or Vector3.zero)
 			partsSerialized[partName] = {
 				Name = pInfo.Name or partName,
 				IsHandle = pInfo.IsHandle or false,
-				RelCFrame = serializeCFrame(pInfo.RelCFrame or CFrame.identity),
+				RelOffset = serializeVector3(relOffset),
 				WorldCFrame = serializeCFrame(pInfo.WorldCFrame or CFrame.identity),
 				Size = {pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1},
 				MeshScale = pInfo.HasMeshScale and {pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1} or nil,
@@ -136,11 +154,13 @@ local function deserializeIncludedObjects(rawList)
 					local sz = pInfo.Size or {1, 1, 1}
 					local ms = pInfo.MeshScale
 					local col = pInfo.Color or {1, 1, 1}
+					local worldCF = deserializeCFrame(pInfo.WorldCFrame)
+					local relOffset = deserializeVector3(pInfo.RelOffset, worldCF.Position)
 					partsDeserialized[partName] = {
 						Name = pInfo.Name or partName,
 						IsHandle = pInfo.IsHandle or false,
-						RelCFrame = deserializeCFrame(pInfo.RelCFrame),
-						WorldCFrame = deserializeCFrame(pInfo.WorldCFrame),
+						RelOffset = relOffset,
+						WorldCFrame = worldCF,
 						SizeX = sz[1] or 1,
 						SizeY = sz[2] or 1,
 						SizeZ = sz[3] or 1,
@@ -237,16 +257,15 @@ local function loadPosesFromFile()
 end
 
 ----------------------------------------------------
--- 50-STUD ACCESSORY SCANNER & VISUAL SPAWNER
+-- 50-STUD ACCESSORY SCANNER & NON-TORSO FOLLOWER
 ----------------------------------------------------
 
 local function scanNearbyAccessories(character, radius)
 	radius = radius or OBJECT_SCAN_RADIUS
-	local anchorPart = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso") or character:FindFirstChild("Head"))
+	local anchorPart = getPositionAnchorPart(character)
 	if not anchorPart then return {} end
 
 	local anchorPos = anchorPart.Position
-	local anchorCF = anchorPart.CFrame
 	local collected = {}
 	local partCounter = 0
 
@@ -304,7 +323,7 @@ local function scanNearbyAccessories(character, radius)
 							partsMap[keyName] = {
 								Name = child.Name,
 								IsHandle = (child == handle),
-								RelCFrame = anchorCF:ToObjectSpace(child.CFrame),
+								RelOffset = child.Position - anchorPos,
 								WorldCFrame = child.CFrame,
 								SizeX = child.Size.X,
 								SizeY = child.Size.Y,
@@ -342,9 +361,15 @@ local function scanNearbyAccessories(character, radius)
 end
 
 local function clearSpawnedPoseObjects()
-	for _, model in ipairs(spawnedPoseObjects) do
-		if typeof(model) == "Instance" then
-			model:Destroy()
+	if activeObjectsFollowLoop then
+		activeObjectsFollowLoop:Disconnect()
+		activeObjectsFollowLoop = nil
+	end
+	for _, entry in ipairs(spawnedPoseObjects) do
+		if typeof(entry) == "Instance" then
+			entry:Destroy()
+		elseif type(entry) == "table" and typeof(entry.Model) == "Instance" then
+			entry.Model:Destroy()
 		end
 	end
 	spawnedPoseObjects = {}
@@ -354,20 +379,26 @@ local function spawnIncludedObjects(character, includedObjects)
 	clearSpawnedPoseObjects()
 	if type(includedObjects) ~= "table" or #includedObjects == 0 then return end
 
-	local anchorPart = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso") or character:FindFirstChild("Head"))
-	local anchorCF = anchorPart and anchorPart.CFrame or CFrame.identity
+	local anchorPart = getPositionAnchorPart(character)
+	local anchorPos = anchorPart and anchorPart.Position or Vector3.zero
+	local trackedParts = {}
 
 	for _, objEntry in ipairs(includedObjects) do
 		local container = Instance.new("Model")
 		container.Name = "IncludedObj_" .. tostring(objEntry.Name or "Accessory")
 
 		for _, pInfo in pairs(objEntry.Parts or {}) do
+			local relOffset = pInfo.RelOffset or Vector3.zero
+			local worldCF = pInfo.WorldCFrame or CFrame.identity
+			local rotationCF = worldCF.Rotation
+
 			local part = Instance.new("Part")
 			part.Name = pInfo.Name or "Part"
 			part.Anchored = true
 			part.CanCollide = false
+			part.Massless = true
 			part.Size = Vector3.new(pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1)
-			part.CFrame = anchorCF * (pInfo.RelCFrame or CFrame.identity)
+			part.CFrame = CFrame.new(anchorPos + relOffset) * rotationCF
 			part.Transparency = pInfo.Transparency or 0
 			part.Reflectance = pInfo.Reflectance or 0
 
@@ -401,11 +432,38 @@ local function spawnIncludedObjects(character, includedObjects)
 			end
 
 			part.Parent = container
+			table.insert(trackedParts, {
+				Part = part,
+				RelOffset = relOffset,
+				RotationCF = rotationCF
+			})
 		end
 
 		container.Parent = workspace
-		table.insert(spawnedPoseObjects, container)
+		table.insert(spawnedPoseObjects, {
+			Model = container
+		})
 	end
+
+	-- Follow character translation via non-rotating root/head anchor without inheriting Torso rotation
+	activeObjectsFollowLoop = RunService.Stepped:Connect(function()
+		if not character or not character.Parent then
+			clearSpawnedPoseObjects()
+			return
+		end
+		local currentAnchor = getPositionAnchorPart(character)
+		if not currentAnchor then return end
+		local currentPos = currentAnchor.Position
+
+		for i = #trackedParts, 1, -1 do
+			local item = trackedParts[i]
+			if item.Part and item.Part.Parent then
+				item.Part.CFrame = CFrame.new(currentPos + item.RelOffset) * item.RotationCF
+			else
+				table.remove(trackedParts, i)
+			end
+		end
+	end)
 end
 
 ----------------------------------------------------
@@ -750,19 +808,36 @@ saveBtn.Font = Enum.Font.SourceSansBold
 saveBtn.TextSize = 15
 saveBtn.Parent = inputFrame
 
--- Scrolling Frame
+-- Scrolling Frame (No bounce-back at bottom)
 local scrollList = Instance.new("ScrollingFrame")
 scrollList.Size = UDim2.new(0.9, 0, 0, 245)
 scrollList.Position = UDim2.new(0.05, 0, 0, 188)
 scrollList.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 scrollList.BorderSizePixel = 0
 scrollList.ScrollBarThickness = 6
+scrollList.ScrollingDirection = Enum.ScrollingDirection.Y
+scrollList.ElasticBehavior = Enum.ElasticBehavior.Never
 scrollList.Parent = mainFrame
+
+local listPadding = Instance.new("UIPadding")
+listPadding.PaddingTop = UDim.new(0, 4)
+listPadding.PaddingBottom = UDim.new(0, 8)
+listPadding.PaddingLeft = UDim.new(0, 4)
+listPadding.PaddingRight = UDim.new(0, 4)
+listPadding.Parent = scrollList
 
 local listLayout = Instance.new("UIListLayout")
 listLayout.Parent = scrollList
 listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 listLayout.Padding = UDim.new(0, 4)
+
+local function updateScrollListCanvasSize()
+	local totalHeight = listLayout.AbsoluteContentSize.Y + listPadding.PaddingTop.Offset + listPadding.PaddingBottom.Offset + 4
+	scrollList.CanvasSize = UDim2.new(0, 0, 0, math.max(totalHeight, scrollList.AbsoluteSize.Y))
+end
+
+listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateScrollListCanvasSize)
+scrollList:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateScrollListCanvasSize)
 
 ----------------------------------------------------
 -- SETTINGS POPUP MODAL
@@ -786,6 +861,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	modalBox.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
 	modalBox.BorderSizePixel = 0
 	modalBox.ScrollBarThickness = 4
+	modalBox.ElasticBehavior = Enum.ElasticBehavior.Never
 	modalBox.ZIndex = 11
 	modalBox.Parent = modal
 
@@ -1043,8 +1119,10 @@ end
 ----------------------------------------------------
 
 function refreshList()
+	local prevCanvasPos = scrollList.CanvasPosition
+
 	for _, child in ipairs(scrollList:GetChildren()) do
-		if not child:IsA("UIListLayout") then
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
 			child:Destroy()
 		end
 	end
@@ -1160,7 +1238,9 @@ function refreshList()
 		end
 	end
 
-	scrollList.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 10)
+	updateScrollListCanvasSize()
+	local maxScrollY = math.max(0, scrollList.CanvasSize.Y.Offset - scrollList.AbsoluteSize.Y)
+	scrollList.CanvasPosition = Vector2.new(0, math.clamp(prevCanvasPos.Y, 0, maxScrollY))
 end
 
 ----------------------------------------------------
@@ -1194,4 +1274,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("xdm3wediUDak")
+print("xdm3wedidit9ak")
