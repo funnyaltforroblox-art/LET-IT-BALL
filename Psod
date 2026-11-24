@@ -19,16 +19,66 @@ local R6_LIMB_MAP = {
 -- Workspace Save Configuration
 local FOLDER_NAME = "R6PoseManager"
 local FILE_NAME = FOLDER_NAME .. "/SavedPoses.json"
+local OBJECT_SCAN_RADIUS = 50
 
--- Pose Database & Folder State
+-- Pose Database, Object Toggle & Folder State
 local SavedFolders = {
 	["Default"] = {}
 }
 local CollapsedFolders = {}
+local includeObjectsEnabled = false
 
 local activePoseLoop = nil
+local spawnedPoseObjects = {}
 local currentLoadedPoseIdentifier = nil 
 local currentLoadedPoseEntry = nil
+
+----------------------------------------------------
+-- TEXTURE, SIZE & POSITION HELPERS (FROM ACESS2)
+----------------------------------------------------
+
+local function normalizeAssetId(val)
+	if not val then return "" end
+	local str = tostring(val)
+	if str == "" then return "" end
+	if string.match(str, "^%d+$") then
+		return "rbxassetid://" .. str
+	end
+	return str
+end
+
+local function getPartColorRGB(part)
+	if typeof(part) == "Instance" and part:IsA("BasePart") then
+		local mesh = part:FindFirstChildWhichIsA("SpecialMesh")
+		if mesh and mesh.VertexColor and mesh.VertexColor ~= Vector3.new(1, 1, 1) and mesh.VertexColor ~= Vector3.new(0, 0, 0) then
+			return math.clamp(mesh.VertexColor.X, 0, 1), math.clamp(mesh.VertexColor.Y, 0, 1), math.clamp(mesh.VertexColor.Z, 0, 1)
+		end
+		return part.Color.R, part.Color.G, part.Color.B
+	end
+	return 1, 1, 1
+end
+
+local function applyPartColorRGB(part, r, g, b)
+	if typeof(part) ~= "Instance" or not part:IsA("BasePart") then return end
+	local cr = math.clamp(tonumber(r) or 1, 0, 1)
+	local cg = math.clamp(tonumber(g) or 1, 0, 1)
+	local cb = math.clamp(tonumber(b) or 1, 0, 1)
+	part.Color = Color3.new(cr, cg, cb)
+
+	local mesh = part:FindFirstChildWhichIsA("SpecialMesh")
+	if mesh and mesh.VertexColor and mesh.VertexColor ~= Vector3.new(1, 1, 1) then
+		mesh.VertexColor = Vector3.new(cr, cg, cb)
+	end
+end
+
+local function isPlayerCharacterDescendant(instance)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.Character and (instance == plr.Character or instance:IsDescendantOf(plr.Character)) then
+			return true
+		end
+	end
+	return false
+end
 
 ----------------------------------------------------
 -- FILE SYSTEM (DELTA WORKSPACE STORAGE)
@@ -42,6 +92,82 @@ end
 local function deserializeCFrame(tbl)
 	if not tbl then return CFrame.identity end
 	return CFrame.new(unpack(tbl))
+end
+
+local function serializeIncludedObjects(objectsList)
+	local out = {}
+	if type(objectsList) ~= "table" then return out end
+	for _, entry in ipairs(objectsList) do
+		local partsSerialized = {}
+		for partName, pInfo in pairs(entry.Parts or {}) do
+			partsSerialized[partName] = {
+				Name = pInfo.Name or partName,
+				IsHandle = pInfo.IsHandle or false,
+				RelCFrame = serializeCFrame(pInfo.RelCFrame or CFrame.identity),
+				WorldCFrame = serializeCFrame(pInfo.WorldCFrame or CFrame.identity),
+				Size = {pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1},
+				MeshScale = pInfo.HasMeshScale and {pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1} or nil,
+				MeshId = pInfo.MeshId or "",
+				TextureId = pInfo.TextureId or "",
+				Color = {pInfo.ColorR or 1, pInfo.ColorG or 1, pInfo.ColorB or 1},
+				Material = pInfo.Material or "Plastic",
+				Transparency = pInfo.Transparency or 0,
+				Reflectance = pInfo.Reflectance or 0,
+				DecalTextures = pInfo.DecalTextures or {}
+			}
+		end
+		table.insert(out, {
+			Name = entry.Name or "Accessory",
+			Distance = entry.Distance or 0,
+			Parts = partsSerialized
+		})
+	end
+	return out
+end
+
+local function deserializeIncludedObjects(rawList)
+	local out = {}
+	if type(rawList) ~= "table" then return out end
+	for _, entry in ipairs(rawList) do
+		if type(entry) == "table" then
+			local partsDeserialized = {}
+			for partName, pInfo in pairs(entry.Parts or {}) do
+				if type(pInfo) == "table" then
+					local sz = pInfo.Size or {1, 1, 1}
+					local ms = pInfo.MeshScale
+					local col = pInfo.Color or {1, 1, 1}
+					partsDeserialized[partName] = {
+						Name = pInfo.Name or partName,
+						IsHandle = pInfo.IsHandle or false,
+						RelCFrame = deserializeCFrame(pInfo.RelCFrame),
+						WorldCFrame = deserializeCFrame(pInfo.WorldCFrame),
+						SizeX = sz[1] or 1,
+						SizeY = sz[2] or 1,
+						SizeZ = sz[3] or 1,
+						HasMeshScale = type(ms) == "table",
+						MeshScaleX = type(ms) == "table" and (ms[1] or 1) or 1,
+						MeshScaleY = type(ms) == "table" and (ms[2] or 1) or 1,
+						MeshScaleZ = type(ms) == "table" and (ms[3] or 1) or 1,
+						MeshId = pInfo.MeshId or "",
+						TextureId = pInfo.TextureId or "",
+						ColorR = col[1] or 1,
+						ColorG = col[2] or 1,
+						ColorB = col[3] or 1,
+						Material = pInfo.Material or "Plastic",
+						Transparency = pInfo.Transparency or 0,
+						Reflectance = pInfo.Reflectance or 0,
+						DecalTextures = type(pInfo.DecalTextures) == "table" and pInfo.DecalTextures or {}
+					}
+				end
+			end
+			table.insert(out, {
+				Name = entry.Name or "Accessory",
+				Distance = entry.Distance or 0,
+				Parts = partsDeserialized
+			})
+		end
+	end
+	return out
 end
 
 local function savePosesToFile()
@@ -59,6 +185,7 @@ local function savePosesToFile()
 				serializableData[folderName][poseName] = {
 					Joints = {},
 					Exclusions = poseData.Exclusions or {},
+					IncludedObjects = serializeIncludedObjects(poseData.IncludedObjects or {}),
 					Trigger = {
 						Enabled = poseData.Trigger and poseData.Trigger.Enabled or false,
 						MinHP = poseData.Trigger and poseData.Trigger.MinHP or 0,
@@ -90,6 +217,7 @@ local function loadPosesFromFile()
 					SavedFolders[folderName][poseName] = {
 						Joints = {},
 						Exclusions = poseData.Exclusions or {},
+						IncludedObjects = deserializeIncludedObjects(poseData.IncludedObjects),
 						Trigger = {
 							Enabled = false, 
 							MinHP = savedTrigger.MinHP or 0,
@@ -98,7 +226,7 @@ local function loadPosesFromFile()
 					}
 					local rawJoints = poseData.Joints or poseData
 					for jointName, cfTbl in pairs(rawJoints) do
-						if jointName ~= "Exclusions" and jointName ~= "Trigger" then
+						if jointName ~= "Exclusions" and jointName ~= "Trigger" and jointName ~= "IncludedObjects" then
 							SavedFolders[folderName][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
 						end
 					end
@@ -106,6 +234,178 @@ local function loadPosesFromFile()
 			end
 		end
 	end)
+end
+
+----------------------------------------------------
+-- 50-STUD ACCESSORY SCANNER & VISUAL SPAWNER
+----------------------------------------------------
+
+local function scanNearbyAccessories(character, radius)
+	radius = radius or OBJECT_SCAN_RADIUS
+	local anchorPart = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso") or character:FindFirstChild("Head"))
+	if not anchorPart then return {} end
+
+	local anchorPos = anchorPart.Position
+	local anchorCF = anchorPart.CFrame
+	local collected = {}
+	local partCounter = 0
+
+	for _, desc in ipairs(workspace:GetDescendants()) do
+		if desc:IsA("Accessory") and not isPlayerCharacterDescendant(desc) then
+			local handle = desc:FindFirstChild("Handle") or desc:FindFirstChildWhichIsA("BasePart", true)
+			if handle and handle:IsA("BasePart") then
+				local dist = (handle.Position - anchorPos).Magnitude
+				if dist <= radius then
+					local partsMap = {}
+					local idx = 0
+
+					for _, child in ipairs(desc:GetDescendants()) do
+						if child:IsA("BasePart") then
+							idx = idx + 1
+							partCounter = partCounter + 1
+							local keyName = (child.Name ~= "" and not partsMap[child.Name]) and child.Name or (child.Name .. "_" .. tostring(partCounter) .. "_" .. tostring(idx))
+
+							local specialMesh = child:FindFirstChildWhichIsA("SpecialMesh")
+							local meshId = ""
+							local textureId = ""
+							local hasMeshScale = false
+							local meshScaleX, meshScaleY, meshScaleZ = 1, 1, 1
+
+							if specialMesh then
+								meshId = normalizeAssetId(specialMesh.MeshId)
+								textureId = normalizeAssetId(specialMesh.TextureId)
+								if specialMesh.Scale then
+									hasMeshScale = true
+									meshScaleX = specialMesh.Scale.X
+									meshScaleY = specialMesh.Scale.Y
+									meshScaleZ = specialMesh.Scale.Z
+								end
+							elseif child:IsA("MeshPart") then
+								meshId = normalizeAssetId(child.MeshId)
+								textureId = normalizeAssetId(child.TextureID)
+							end
+
+							local decalTextures = {}
+							for _, sub in ipairs(child:GetChildren()) do
+								if sub:IsA("Decal") or sub:IsA("Texture") then
+									table.insert(decalTextures, {
+										ClassName = sub.ClassName,
+										Name = sub.Name,
+										Texture = normalizeAssetId(sub.Texture),
+										Face = tostring(sub.Face),
+										Transparency = sub.Transparency
+									})
+								end
+							end
+
+							local cR, cG, cB = getPartColorRGB(child)
+							local matStr = string.gsub(tostring(child.Material), "^Enum%.Material%.", "")
+
+							partsMap[keyName] = {
+								Name = child.Name,
+								IsHandle = (child == handle),
+								RelCFrame = anchorCF:ToObjectSpace(child.CFrame),
+								WorldCFrame = child.CFrame,
+								SizeX = child.Size.X,
+								SizeY = child.Size.Y,
+								SizeZ = child.Size.Z,
+								HasMeshScale = hasMeshScale,
+								MeshScaleX = meshScaleX,
+								MeshScaleY = meshScaleY,
+								MeshScaleZ = meshScaleZ,
+								MeshId = meshId,
+								TextureId = textureId,
+								ColorR = cR,
+								ColorG = cG,
+								ColorB = cB,
+								Material = matStr,
+								Transparency = child.Transparency,
+								Reflectance = child.Reflectance,
+								DecalTextures = decalTextures
+							}
+						end
+					end
+
+					if next(partsMap) ~= nil then
+						table.insert(collected, {
+							Name = desc.Name,
+							Distance = math.floor(dist * 100) / 100,
+							Parts = partsMap
+						})
+					end
+				end
+			end
+		end
+	end
+
+	return collected
+end
+
+local function clearSpawnedPoseObjects()
+	for _, model in ipairs(spawnedPoseObjects) do
+		if typeof(model) == "Instance" then
+			model:Destroy()
+		end
+	end
+	spawnedPoseObjects = {}
+end
+
+local function spawnIncludedObjects(character, includedObjects)
+	clearSpawnedPoseObjects()
+	if type(includedObjects) ~= "table" or #includedObjects == 0 then return end
+
+	local anchorPart = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso") or character:FindFirstChild("Head"))
+	local anchorCF = anchorPart and anchorPart.CFrame or CFrame.identity
+
+	for _, objEntry in ipairs(includedObjects) do
+		local container = Instance.new("Model")
+		container.Name = "IncludedObj_" .. tostring(objEntry.Name or "Accessory")
+
+		for _, pInfo in pairs(objEntry.Parts or {}) do
+			local part = Instance.new("Part")
+			part.Name = pInfo.Name or "Part"
+			part.Anchored = true
+			part.CanCollide = false
+			part.Size = Vector3.new(pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1)
+			part.CFrame = anchorCF * (pInfo.RelCFrame or CFrame.identity)
+			part.Transparency = pInfo.Transparency or 0
+			part.Reflectance = pInfo.Reflectance or 0
+
+			local matEnum = Enum.Material[tostring(pInfo.Material or "Plastic")]
+			part.Material = matEnum or Enum.Material.Plastic
+			applyPartColorRGB(part, pInfo.ColorR, pInfo.ColorG, pInfo.ColorB)
+
+			local meshId = normalizeAssetId(pInfo.MeshId)
+			local textureId = normalizeAssetId(pInfo.TextureId)
+
+			if meshId ~= "" or textureId ~= "" or pInfo.HasMeshScale then
+				local sm = Instance.new("SpecialMesh")
+				sm.MeshType = meshId ~= "" and Enum.MeshType.FileMesh or Enum.MeshType.Brick
+				if meshId ~= "" then sm.MeshId = meshId end
+				if textureId ~= "" then sm.TextureId = textureId end
+				if pInfo.HasMeshScale then
+					sm.Scale = Vector3.new(pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1)
+				end
+				sm.Parent = part
+			end
+
+			for _, decInfo in ipairs(pInfo.DecalTextures or {}) do
+				local decClass = (decInfo.ClassName == "Texture") and "Texture" or "Decal"
+				local dec = Instance.new(decClass)
+				dec.Name = decInfo.Name or decClass
+				dec.Texture = normalizeAssetId(decInfo.Texture)
+				dec.Transparency = decInfo.Transparency or 0
+				local faceEnum = Enum.NormalId[tostring(decInfo.Face or "Front")]
+				if faceEnum then dec.Face = faceEnum end
+				dec.Parent = part
+			end
+
+			part.Parent = container
+		end
+
+		container.Parent = workspace
+		table.insert(spawnedPoseObjects, container)
+	end
 end
 
 ----------------------------------------------------
@@ -117,12 +417,15 @@ local function unloadPose(character)
 		activePoseLoop:Disconnect()
 		activePoseLoop = nil
 	end
+	clearSpawnedPoseObjects()
 	currentLoadedPoseIdentifier = nil
 	currentLoadedPoseEntry = nil
 
-	local animateScript = character:FindFirstChild("Animate")
-	if animateScript and animateScript:IsA("LocalScript") then
-		animateScript.Disabled = false
+	if character then
+		local animateScript = character:FindFirstChild("Animate")
+		if animateScript and animateScript:IsA("LocalScript") then
+			animateScript.Disabled = false
+		end
 	end
 end
 
@@ -159,9 +462,12 @@ local function extractPoseData(character)
 		end
 	end
 
+	local capturedObjects = includeObjectsEnabled and scanNearbyAccessories(character, OBJECT_SCAN_RADIUS) or {}
+
 	return {
 		Joints = joints,
 		Exclusions = {},
+		IncludedObjects = capturedObjects,
 		Trigger = { Enabled = false, MinHP = 0, MaxHP = 100 }
 	}
 end
@@ -197,6 +503,7 @@ local function applyPoseData(character, poseEntry, poseIdentifier)
 	local poseData = poseEntry.Joints
 	local exclusions = poseEntry.Exclusions or {}
 
+	spawnIncludedObjects(character, poseEntry.IncludedObjects)
 	freezeAnimations(character, exclusions)
 
 	activePoseLoop = RunService.Stepped:Connect(function()
@@ -335,8 +642,8 @@ makeDraggable(toggleBtn)
 -- Main Frame
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
-mainFrame.Size = UDim2.new(0, 320, 0, 420)
-mainFrame.Position = UDim2.new(0.5, -160, 0.5, -210)
+mainFrame.Size = UDim2.new(0, 320, 0, 445)
+mainFrame.Position = UDim2.new(0.5, -160, 0.5, -222)
 mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 mainFrame.BorderSizePixel = 0
 mainFrame.Visible = false
@@ -349,7 +656,7 @@ mainCorner.Parent = mainFrame
 -- Title Header
 local title = Instance.new("TextLabel")
 title.Name = "Header"
-title.Size = UDim2.new(1, 0, 0, 35)
+title.Size = UDim2.new(1, 0, 0, 32)
 title.BackgroundTransparency = 1
 title.Text = "R6 Pose Manager (Drag Here)"
 title.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -359,10 +666,55 @@ title.Parent = mainFrame
 
 makeDraggable(mainFrame, title)
 
+-- Top Checkbox: Include objects (50 stud radius, non-player accessories)
+local includeObjectsBtn = Instance.new("TextButton")
+includeObjectsBtn.Name = "IncludeObjectsCheckbox"
+includeObjectsBtn.Size = UDim2.new(0.9, 0, 0, 26)
+includeObjectsBtn.Position = UDim2.new(0.05, 0, 0, 34)
+includeObjectsBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 48)
+includeObjectsBtn.BorderSizePixel = 0
+includeObjectsBtn.Text = ""
+includeObjectsBtn.Parent = mainFrame
+
+local incObjCorner = Instance.new("UICorner")
+incObjCorner.CornerRadius = UDim.new(0, 6)
+incObjCorner.Parent = includeObjectsBtn
+
+local includeObjectsBox = Instance.new("TextLabel")
+includeObjectsBox.Size = UDim2.new(0, 18, 0, 18)
+includeObjectsBox.Position = UDim2.new(0, 6, 0.5, -9)
+includeObjectsBox.BackgroundColor3 = Color3.fromRGB(55, 55, 68)
+includeObjectsBox.Text = ""
+includeObjectsBox.TextColor3 = Color3.fromRGB(0, 255, 130)
+includeObjectsBox.Font = Enum.Font.SourceSansBold
+includeObjectsBox.TextSize = 14
+includeObjectsBox.Parent = includeObjectsBtn
+
+local incBoxCorner = Instance.new("UICorner")
+incBoxCorner.CornerRadius = UDim.new(0, 4)
+incBoxCorner.Parent = includeObjectsBox
+
+local includeObjectsLabel = Instance.new("TextLabel")
+includeObjectsLabel.Size = UDim2.new(1, -34, 1, 0)
+includeObjectsLabel.Position = UDim2.new(0, 30, 0, 0)
+includeObjectsLabel.BackgroundTransparency = 1
+includeObjectsLabel.Text = "Include objects (50st accessories)"
+includeObjectsLabel.TextColor3 = Color3.fromRGB(225, 225, 235)
+includeObjectsLabel.TextXAlignment = Enum.TextXAlignment.Left
+includeObjectsLabel.Font = Enum.Font.SourceSansBold
+includeObjectsLabel.TextSize = 13
+includeObjectsLabel.Parent = includeObjectsBtn
+
+includeObjectsBtn.MouseButton1Click:Connect(function()
+	includeObjectsEnabled = not includeObjectsEnabled
+	includeObjectsBox.Text = includeObjectsEnabled and "✓" or ""
+	includeObjectsBox.BackgroundColor3 = includeObjectsEnabled and Color3.fromRGB(0, 130, 70) or Color3.fromRGB(55, 55, 68)
+end)
+
 -- Input Controls
 local inputFrame = Instance.new("Frame")
 inputFrame.Size = UDim2.new(0.9, 0, 0, 110)
-inputFrame.Position = UDim2.new(0.05, 0, 0.08, 0)
+inputFrame.Position = UDim2.new(0.05, 0, 0, 68)
 inputFrame.BackgroundTransparency = 1
 inputFrame.Parent = mainFrame
 
@@ -400,8 +752,8 @@ saveBtn.Parent = inputFrame
 
 -- Scrolling Frame
 local scrollList = Instance.new("ScrollingFrame")
-scrollList.Size = UDim2.new(0.9, 0, 0.52, 0)
-scrollList.Position = UDim2.new(0.05, 0, 0.38, 0)
+scrollList.Size = UDim2.new(0.9, 0, 0, 245)
+scrollList.Position = UDim2.new(0.05, 0, 0, 188)
 scrollList.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 scrollList.BorderSizePixel = 0
 scrollList.ScrollBarThickness = 6
@@ -719,6 +1071,7 @@ function refreshList()
 			for poseName, poseEntry in pairs(poses) do
 				local poseIdentifier = folderName .. "/" .. poseName
 				local isCurrentlyLoaded = (currentLoadedPoseIdentifier == poseIdentifier)
+				local objCount = poseEntry.IncludedObjects and #poseEntry.IncludedObjects or 0
 
 				local poseItem = Instance.new("Frame")
 				poseItem.Size = UDim2.new(1, -8, 0, 30)
@@ -728,11 +1081,12 @@ function refreshList()
 				local poseNameLabel = Instance.new("TextLabel")
 				poseNameLabel.Size = UDim2.new(0.4, 0, 1, 0)
 				poseNameLabel.BackgroundTransparency = 1
-				poseNameLabel.Text = "   " .. poseName
+				poseNameLabel.Text = "   " .. poseName .. (objCount > 0 and (" [" .. objCount .. " obj]") or "")
 				poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
 				poseNameLabel.TextXAlignment = Enum.TextXAlignment.Left
 				poseNameLabel.Font = Enum.Font.SourceSans
 				poseNameLabel.TextSize = 13
+				poseNameLabel.TextTruncate = Enum.TextTruncate.AtEnd
 				poseNameLabel.Parent = poseItem
 
 				local loadBtn = Instance.new("TextButton")
@@ -840,4 +1194,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("xdm3wedidit9ak")
+print("xdm3wediUDak")
