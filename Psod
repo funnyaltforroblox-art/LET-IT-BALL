@@ -73,6 +73,13 @@ local function ensureFolderHierarchy(folderPath)
 	return normalized
 end
 
+local function collapseAllFolders()
+	CollapsedFolders = {}
+	for folderPath in pairs(SavedFolders) do
+		CollapsedFolders[folderPath] = true
+	end
+end
+
 local function getFolderDepth(folderPath)
 	local depth = 0
 	for _ in string.gmatch(folderPath, "/") do
@@ -127,7 +134,6 @@ local function deleteFolderAndSubfolders(targetFolderPath)
 	for _, path in ipairs(toRemove) do
 		if currentLoadedPoseIdentifier and currentLoadedPoseIdentifier:sub(1, #path + 1) == (path .. "/") then
 			if LocalPlayer.Character then
-				-- Will unload active pose if it belonged to deleted folder
 				if activePoseLoop then
 					activePoseLoop:Disconnect()
 					activePoseLoop = nil
@@ -692,7 +698,6 @@ local function movePoseToFolder(sourceFolderPath, poseName, targetFolderRaw)
 	local entry = SavedFolders[sourceFolderPath][poseName]
 	local finalPoseName = poseName
 
-	-- Avoid overwriting an existing pose with the same name in target folder
 	if SavedFolders[targetFolderPath][finalPoseName] then
 		local suffix = 2
 		while SavedFolders[targetFolderPath][poseName .. "_" .. tostring(suffix)] do
@@ -1621,7 +1626,6 @@ refreshList = function()
 				refreshList()
 			end)
 
-			-- Quick "+Sub" button on every folder to prefill subfolder path
 			local addSubBtn = Instance.new("TextButton")
 			addSubBtn.Size = UDim2.new(0.15, 0, 0.8, 0)
 			addSubBtn.Position = UDim2.new(folderName ~= "Default" and 0.73 or 0.83, 0, 0.1, 0)
@@ -1839,8 +1843,9 @@ saveBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
--- Load existing saved poses on startup
+-- Load existing saved poses on startup and start with all folders closed
 loadPosesFromFile()
+collapseAllFolders()
 updateAnimationLayout()
 refreshList()
 print("xdm3wedidit9ak")
