@@ -37,6 +37,7 @@ local activeObjectsFollowLoop = nil
 local spawnedPoseObjects = {}
 local currentLoadedPoseIdentifier = nil 
 local currentLoadedPoseEntry = nil
+local extractedDuplicateCounter = 0
 
 local refreshList -- forward declaration
 
@@ -101,11 +102,12 @@ end
 local function serializeIncludedObjects(objectsList)
 	local out = {}
 	if type(objectsList) ~= "table" then return out end
-	for _, entry in ipairs(objectsList) do
+	for index, entry in ipairs(objectsList) do
 		local partsSerialized = {}
-		for partName, pInfo in pairs(entry.Parts or {}) do
-			partsSerialized[partName] = {
-				Name = pInfo.Name or partName,
+		for partKey, pInfo in pairs(entry.Parts or {}) do
+			partsSerialized[partKey] = {
+				Key = pInfo.Key or partKey,
+				Name = pInfo.Name or partKey,
 				IsHandle = pInfo.IsHandle or false,
 				RootRelCFrame = serializeCFrame(pInfo.RootRelCFrame or CFrame.identity),
 				Size = {pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1},
@@ -120,6 +122,7 @@ local function serializeIncludedObjects(objectsList)
 			}
 		end
 		table.insert(out, {
+			UniqueId = entry.UniqueId or ("acc_" .. tostring(index)),
 			Name = entry.Name or "Accessory",
 			Parts = partsSerialized
 		})
@@ -130,16 +133,17 @@ end
 local function deserializeIncludedObjects(rawList)
 	local out = {}
 	if type(rawList) ~= "table" then return out end
-	for _, entry in ipairs(rawList) do
+	for index, entry in ipairs(rawList) do
 		if type(entry) == "table" then
 			local partsDeserialized = {}
-			for partName, pInfo in pairs(entry.Parts or {}) do
+			for partKey, pInfo in pairs(entry.Parts or {}) do
 				if type(pInfo) == "table" then
 					local sz = pInfo.Size or {1, 1, 1}
 					local ms = pInfo.MeshScale
 					local col = pInfo.Color or {1, 1, 1}
-					partsDeserialized[partName] = {
-						Name = pInfo.Name or partName,
+					partsDeserialized[partKey] = {
+						Key = pInfo.Key or partKey,
+						Name = pInfo.Name or partKey,
 						IsHandle = pInfo.IsHandle or false,
 						RootRelCFrame = deserializeCFrame(pInfo.RootRelCFrame),
 						SizeX = sz[1] or 1,
@@ -162,6 +166,7 @@ local function deserializeIncludedObjects(rawList)
 				end
 			end
 			table.insert(out, {
+				UniqueId = entry.UniqueId or ("acc_" .. tostring(index)),
 				Name = entry.Name or "Accessory",
 				Parts = partsDeserialized
 			})
@@ -262,85 +267,88 @@ local function scanAttachedPlayerAccessories(character)
 	local collected = {}
 	local partCounter = 0
 
-	for _, child in ipairs(character:GetChildren()) do
+	for accIndex, child in ipairs(character:GetChildren()) do
 		if child:IsA("Accessory") and not isSpawnedPoseObject(child) then
+			extractedDuplicateCounter = extractedDuplicateCounter + 1
+			local uniqueId = string.format("%s__dup_%d_%d", tostring(child.Name), accIndex, extractedDuplicateCounter)
+
 			local handle = child:FindFirstChild("Handle") or child:FindFirstChildWhichIsA("BasePart", true)
-			if handle and handle:IsA("BasePart") then
-				local partsMap = {}
-				local idx = 0
+			local partsMap = {}
+			local idx = 0
 
-				for _, desc in ipairs(child:GetDescendants()) do
-					if desc:IsA("BasePart") then
-						idx = idx + 1
-						partCounter = partCounter + 1
-						local keyName = (desc.Name ~= "" and not partsMap[desc.Name]) and desc.Name or (desc.Name .. "_" .. tostring(partCounter) .. "_" .. tostring(idx))
+			for _, desc in ipairs(child:GetDescendants()) do
+				if desc:IsA("BasePart") then
+					idx = idx + 1
+					partCounter = partCounter + 1
+					local partKey = string.format("%s__p%d_%d", desc.Name ~= "" and desc.Name or "Part", partCounter, idx)
 
-						local specialMesh = desc:FindFirstChildWhichIsA("SpecialMesh")
-						local meshId = ""
-						local textureId = ""
-						local hasMeshScale = false
-						local meshScaleX, meshScaleY, meshScaleZ = 1, 1, 1
+					local specialMesh = desc:FindFirstChildWhichIsA("SpecialMesh")
+					local meshId = ""
+					local textureId = ""
+					local hasMeshScale = false
+					local meshScaleX, meshScaleY, meshScaleZ = 1, 1, 1
 
-						if specialMesh then
-							meshId = normalizeAssetId(specialMesh.MeshId)
-							textureId = normalizeAssetId(specialMesh.TextureId)
-							if specialMesh.Scale then
-								hasMeshScale = true
-								meshScaleX = specialMesh.Scale.X
-								meshScaleY = specialMesh.Scale.Y
-								meshScaleZ = specialMesh.Scale.Z
-							end
-						elseif desc:IsA("MeshPart") then
-							meshId = normalizeAssetId(desc.MeshId)
-							textureId = normalizeAssetId(desc.TextureID)
+					if specialMesh then
+						meshId = normalizeAssetId(specialMesh.MeshId)
+						textureId = normalizeAssetId(specialMesh.TextureId)
+						if specialMesh.Scale then
+							hasMeshScale = true
+							meshScaleX = specialMesh.Scale.X
+							meshScaleY = specialMesh.Scale.Y
+							meshScaleZ = specialMesh.Scale.Z
 						end
-
-						local decalTextures = {}
-						for _, sub in ipairs(desc:GetChildren()) do
-							if sub:IsA("Decal") or sub:IsA("Texture") then
-								table.insert(decalTextures, {
-									ClassName = sub.ClassName,
-									Name = sub.Name,
-									Texture = normalizeAssetId(sub.Texture),
-									Face = tostring(sub.Face),
-									Transparency = sub.Transparency
-								})
-							end
-						end
-
-						local cR, cG, cB = getPartColorRGB(desc)
-						local matStr = string.gsub(tostring(desc.Material), "^Enum%.Material%.", "")
-
-						partsMap[keyName] = {
-							Name = desc.Name,
-							IsHandle = (desc == handle),
-							RootRelCFrame = anchorCF:ToObjectSpace(desc.CFrame),
-							SizeX = desc.Size.X,
-							SizeY = desc.Size.Y,
-							SizeZ = desc.Size.Z,
-							HasMeshScale = hasMeshScale,
-							MeshScaleX = meshScaleX,
-							MeshScaleY = meshScaleY,
-							MeshScaleZ = meshScaleZ,
-							MeshId = meshId,
-							TextureId = textureId,
-							ColorR = cR,
-							ColorG = cG,
-							ColorB = cB,
-							Material = matStr,
-							Transparency = desc.Transparency,
-							Reflectance = desc.Reflectance,
-							DecalTextures = decalTextures
-						}
+					elseif desc:IsA("MeshPart") then
+						meshId = normalizeAssetId(desc.MeshId)
+						textureId = normalizeAssetId(desc.TextureID)
 					end
-				end
 
-				if next(partsMap) ~= nil then
-					table.insert(collected, {
-						Name = child.Name,
-						Parts = partsMap
-					})
+					local decalTextures = {}
+					for _, sub in ipairs(desc:GetChildren()) do
+						if sub:IsA("Decal") or sub:IsA("Texture") then
+							table.insert(decalTextures, {
+								ClassName = sub.ClassName,
+								Name = sub.Name,
+								Texture = normalizeAssetId(sub.Texture),
+								Face = tostring(sub.Face),
+								Transparency = sub.Transparency
+							})
+						end
+					end
+
+					local cR, cG, cB = getPartColorRGB(desc)
+					local matStr = string.gsub(tostring(desc.Material), "^Enum%.Material%.", "")
+
+					partsMap[partKey] = {
+						Key = partKey,
+						Name = desc.Name,
+						IsHandle = (handle ~= nil and desc == handle),
+						RootRelCFrame = anchorCF:ToObjectSpace(desc.CFrame),
+						SizeX = desc.Size.X,
+						SizeY = desc.Size.Y,
+						SizeZ = desc.Size.Z,
+						HasMeshScale = hasMeshScale,
+						MeshScaleX = meshScaleX,
+						MeshScaleY = meshScaleY,
+						MeshScaleZ = meshScaleZ,
+						MeshId = meshId,
+						TextureId = textureId,
+						ColorR = cR,
+						ColorG = cG,
+						ColorB = cB,
+						Material = matStr,
+						Transparency = desc.Transparency,
+						Reflectance = desc.Reflectance,
+						DecalTextures = decalTextures
+					}
 				end
+			end
+
+			if next(partsMap) ~= nil then
+				table.insert(collected, {
+					UniqueId = uniqueId,
+					Name = child.Name,
+					Parts = partsMap
+				})
 			end
 		end
 	end
@@ -382,9 +390,9 @@ local function spawnIncludedObjects(character, includedObjects)
 	local anchorCF = anchorPart and anchorPart.CFrame or CFrame.identity
 	local trackedParts = {}
 
-	for _, objEntry in ipairs(includedObjects) do
+	for idx, objEntry in ipairs(includedObjects) do
 		local container = Instance.new("Model")
-		container.Name = "StaticAcc_" .. tostring(objEntry.Name or "Accessory")
+		container.Name = string.format("StaticAcc_%s_%d", tostring(objEntry.Name or "Accessory"), idx)
 
 		for _, pInfo in pairs(objEntry.Parts or {}) do
 			local part = Instance.new("Part")
@@ -576,7 +584,7 @@ local function applyPoseData(character, poseEntry, poseIdentifier, forceApply)
 end
 
 ----------------------------------------------------
--- ORDERED POSE ANIMATION RUNNER
+-- ORDERED POSE ANIMATION RUNNER (LOOPS TO HIGHEST NUMBER)
 ----------------------------------------------------
 
 local function stopAnimationSequence(resetPose)
@@ -589,12 +597,18 @@ end
 
 local function getOrderedPoseSteps()
 	local steps = {}
+	local highestOrder = 0
+
 	for folderName, poses in pairs(SavedFolders) do
 		for poseName, poseEntry in pairs(poses) do
 			local orderNum = tonumber(poseEntry.AnimOrder)
 			if orderNum and orderNum >= 1 then
+				local intOrder = math.floor(orderNum)
+				if intOrder > highestOrder then
+					highestOrder = intOrder
+				end
 				table.insert(steps, {
-					Order = math.floor(orderNum),
+					Order = intOrder,
 					FolderName = folderName,
 					PoseName = poseName,
 					PoseEntry = poseEntry,
@@ -614,49 +628,49 @@ local function getOrderedPoseSteps()
 		return a.PoseName < b.PoseName
 	end)
 
-	return steps
+	return steps, highestOrder
 end
 
 local function startAnimationSequence()
 	stopAnimationSequence(false)
-	local steps = getOrderedPoseSteps()
-	if #steps == 0 then return end
+	local steps, highestOrder = getOrderedPoseSteps()
+	if #steps == 0 or highestOrder < 1 then return end
 
 	activeAnimationToken = activeAnimationToken + 1
 	local myToken = activeAnimationToken
 	activeAnimationPlaying = true
 
-	local finalOrder = steps[#steps].Order
-
 	task.spawn(function()
-		for _, step in ipairs(steps) do
-			if not animationModeEnabled or activeAnimationToken ~= myToken then
-				return
-			end
-
-			local char = LocalPlayer.Character
-			if not char or not char.Parent then
+		while animationModeEnabled and activeAnimationToken == myToken do
+			local currentSteps, currentMaxOrder = getOrderedPoseSteps()
+			if #currentSteps == 0 or currentMaxOrder < 1 then
 				break
 			end
 
-			applyPoseData(char, step.PoseEntry, step.Identifier, true)
-			if refreshList then
-				refreshList()
-			end
-
-			local waitTime = math.max(0, tonumber(animationDelaySeconds) or 0)
-			local elapsed = 0
-			while elapsed < waitTime do
+			for _, step in ipairs(currentSteps) do
 				if not animationModeEnabled or activeAnimationToken ~= myToken then
 					return
 				end
-				local dt = task.wait(0.05)
-				elapsed = elapsed + dt
-			end
 
-			-- Reset cleanly after finishing the final ordered number
-			if step.Order == finalOrder then
-				break
+				local char = LocalPlayer.Character
+				if not char or not char.Parent then
+					break
+				end
+
+				applyPoseData(char, step.PoseEntry, step.Identifier, true)
+				if refreshList then
+					refreshList()
+				end
+
+				local waitTime = math.max(0, tonumber(animationDelaySeconds) or 0)
+				local elapsed = 0
+				while elapsed < waitTime do
+					if not animationModeEnabled or activeAnimationToken ~= myToken then
+						return
+					end
+					local dt = task.wait(0.05)
+					elapsed = elapsed + dt
+				end
 			end
 		end
 
