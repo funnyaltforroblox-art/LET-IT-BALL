@@ -1,167 +1,112 @@
--- Services
+-- Health-Based Face & Model Customizer (Robust Memory & JSON Fix + Exact Color/Texture Copy + Slot Thresholds & Custom Categories + "nil" HP Disable + Transparency + Duplicate Item Support + Effects Tab + R6QualityVisual Enforcement)
+repeat task.wait() until game:IsLoaded()
+
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
+repeat task.wait() until LocalPlayer:FindFirstChild("PlayerGui")
 
--- Map R6 Body Parts to their controlling Motor6D joint name
-local R6_LIMB_MAP = {
-	["Head"] = "Neck",
-	["Right Arm"] = "Right Shoulder",
-	["Left Arm"] = "Left Shoulder",
-	["Right Leg"] = "Right Hip",
-	["Left Leg"] = "Left Hip",
-	["HumanoidRootPart"] = "RootJoint"
+local FILE_NAME = "FEX_Customizer_Presets.json"
+local QUALITY_VISUAL_PART_NAME = "R6QualityVisual"
+
+local Config = {
+	SelectedDefault  = "face acc",      
+	SelectedMinor    = "MinorDamage",   
+	SelectedMedium   = "MediumDamage",  
+	SelectedMajor    = "MajorDamage",   
+	SelectedCritical = "CriticalDamage" 
 }
 
--- Workspace Save Configuration
-local FOLDER_NAME = "R6PoseManager"
-local FILE_NAME = FOLDER_NAME .. "/SavedPoses.json"
-
--- Pose Database, Object Toggle, Animation State & Folder State
-local SavedFolders = {
-	["Default"] = {}
+local DEFAULT_THRESHOLDS = {
+	[Config.SelectedMinor]    = 0.75,
+	[Config.SelectedMedium]   = 0.50,
+	[Config.SelectedMajor]    = 0.30,
+	[Config.SelectedCritical] = 0.15
 }
-local CollapsedFolders = {}
-local includeObjectsEnabled = false
 
-local animationModeEnabled = false
-local animationDelaySeconds = 0.5
-local activeAnimationToken = 0
-local activeAnimationPlaying = false
+local function isQualityVisualPart(partName)
+	return tostring(partName or "") == QUALITY_VISUAL_PART_NAME
+end
 
-local activePoseLoop = nil
-local activeObjectsFollowLoop = nil
-local spawnedPoseObjects = {}
-local currentLoadedPoseIdentifier = nil 
-local currentLoadedPoseEntry = nil
-local extractedDuplicateCounter = 0
-
-local refreshList -- forward declaration
-
-----------------------------------------------------
--- FOLDER & SUBFOLDER PATH HELPERS
-----------------------------------------------------
-
-local function normalizeFolderPath(rawPath)
-	local cleaned = tostring(rawPath or ""):gsub("\\", "/")
-	local parts = {}
-	for segment in string.gmatch(cleaned, "[^/]+") do
-		local trimmed = segment:match("^%s*(.-)%s*$")
-		if trimmed ~= "" then
-			table.insert(parts, trimmed)
+local function cloneTable(tbl)
+	if type(tbl) ~= "table" then return {} end
+	local ok, encoded = pcall(function()
+		return HttpService:JSONEncode(tbl)
+	end)
+	if ok and encoded then
+		local okDec, decoded = pcall(function()
+			return HttpService:JSONDecode(encoded)
+		end)
+		if okDec and type(decoded) == "table" then
+			return decoded
 		end
 	end
-	if #parts == 0 then
-		return "Default"
-	end
-	return table.concat(parts, "/")
+	return {}
 end
 
-local function ensureFolderHierarchy(folderPath)
-	local normalized = normalizeFolderPath(folderPath)
-	local parts = {}
-	for segment in string.gmatch(normalized, "[^/]+") do
-		table.insert(parts, segment)
-		local currentPath = table.concat(parts, "/")
-		if not SavedFolders[currentPath] then
-			SavedFolders[currentPath] = {}
-		end
-	end
-	return normalized
-end
-
-local function collapseAllFolders()
-	CollapsedFolders = {}
-	for folderPath in pairs(SavedFolders) do
-		CollapsedFolders[folderPath] = true
-	end
-end
-
-local function getFolderDepth(folderPath)
-	local depth = 0
-	for _ in string.gmatch(folderPath, "/") do
-		depth = depth + 1
-	end
-	return depth
-end
-
-local function getFolderDisplayName(folderPath)
-	local leaf = folderPath:match("([^/]+)$")
-	return leaf or folderPath
-end
-
-local function isAnyAncestorCollapsed(folderPath)
-	local parts = {}
-	for segment in string.gmatch(folderPath, "[^/]+") do
-		table.insert(parts, segment)
-	end
-	for i = 1, #parts - 1 do
-		local ancestorPath = table.concat(parts, "/", 1, i)
-		if CollapsedFolders[ancestorPath] then
+local function isNilThreshold(val)
+	if val == nil then return true end
+	if type(val) == "string" then
+		local trimmed = string.lower(string.gsub(val, "^%s*(.-)%s*$", "%1"))
+		if trimmed == "nil" or trimmed == "none" or trimmed == "" then
 			return true
 		end
 	end
 	return false
 end
 
-local function getSortedFolderPaths()
-	local paths = {}
-	for folderPath in pairs(SavedFolders) do
-		table.insert(paths, folderPath)
+local function normalizeThreshold(val, fallback)
+	if isNilThreshold(val) then
+		return "nil"
 	end
-	table.sort(paths, function(a, b)
-		if a == "Default" and b ~= "Default" then return true end
-		if b == "Default" and a ~= "Default" then return false end
-		return a:lower() < b:lower()
-	end)
-	return paths
-end
-
-local function deleteFolderAndSubfolders(targetFolderPath)
-	if targetFolderPath == "Default" then return end
-	local prefix = targetFolderPath .. "/"
-	local toRemove = {}
-
-	for folderPath in pairs(SavedFolders) do
-		if folderPath == targetFolderPath or folderPath:sub(1, #prefix) == prefix then
-			table.insert(toRemove, folderPath)
+	local num = tonumber(val)
+	if not num then
+		if isNilThreshold(fallback) then
+			return "nil"
 		end
+		local fbNum = tonumber(fallback) or 0.5
+		if fbNum > 1 then fbNum = fbNum / 100 end
+		return math.clamp(fbNum, 0, 1)
 	end
-
-	for _, path in ipairs(toRemove) do
-		if currentLoadedPoseIdentifier and currentLoadedPoseIdentifier:sub(1, #path + 1) == (path .. "/") then
-			if LocalPlayer.Character then
-				if activePoseLoop then
-					activePoseLoop:Disconnect()
-					activePoseLoop = nil
-				end
-				currentLoadedPoseIdentifier = nil
-				currentLoadedPoseEntry = nil
-			end
-		end
-		SavedFolders[path] = nil
-		CollapsedFolders[path] = nil
+	if num > 1 then
+		num = num / 100
 	end
+	return math.clamp(num, 0, 1)
 end
 
-----------------------------------------------------
--- TEXTURE, SIZE & FORM HELPERS
-----------------------------------------------------
-
-local function normalizeAssetId(val)
-	if not val then return "" end
-	local str = tostring(val)
-	if str == "" then return "" end
-	if string.match(str, "^%d+$") then
-		return "rbxassetid://" .. str
+local function formatThresholdText(val)
+	if isNilThreshold(val) then
+		return "nil"
 	end
-	return str
+	local num = tonumber(val)
+	if not num then return "nil" end
+	return string.format("%.2f", math.clamp(num, 0, 1))
 end
 
-local function getPartColorRGB(part)
+local function normalizeTransparency(val, fallback)
+	local num = tonumber(val)
+	if not num then
+		num = tonumber(fallback) or 0
+	end
+	return math.clamp(num, 0, 1)
+end
+
+local function normalizeColorChannel(val, fallback)
+	local num = tonumber(val)
+	if not num then
+		num = tonumber(fallback)
+		if not num then return 1 end
+	end
+	if num > 1 then
+		num = num / 255
+	end
+	return math.clamp(num, 0, 1)
+end
+
+local function getPartInitialColor(part)
 	if typeof(part) == "Instance" and part:IsA("BasePart") then
 		local mesh = part:FindFirstChildWhichIsA("SpecialMesh")
 		if mesh and mesh.VertexColor and mesh.VertexColor ~= Vector3.new(1, 1, 1) and mesh.VertexColor ~= Vector3.new(0, 0, 0) then
@@ -172,1680 +117,2189 @@ local function getPartColorRGB(part)
 	return 1, 1, 1
 end
 
-local function applyPartColorRGB(part, r, g, b)
+local function applyPartColor(part, rVal, gVal, bVal)
 	if typeof(part) ~= "Instance" or not part:IsA("BasePart") then return end
-	local cr = math.clamp(tonumber(r) or 1, 0, 1)
-	local cg = math.clamp(tonumber(g) or 1, 0, 1)
-	local cb = math.clamp(tonumber(b) or 1, 0, 1)
-	part.Color = Color3.new(cr, cg, cb)
+	local r = normalizeColorChannel(rVal, part.Color.R)
+	local g = normalizeColorChannel(gVal, part.Color.G)
+	local b = normalizeColorChannel(bVal, part.Color.B)
+	part.Color = Color3.new(r, g, b)
 
 	local mesh = part:FindFirstChildWhichIsA("SpecialMesh")
 	if mesh and mesh.VertexColor and mesh.VertexColor ~= Vector3.new(1, 1, 1) then
-		mesh.VertexColor = Vector3.new(cr, cg, cb)
+		mesh.VertexColor = Vector3.new(r, g, b)
 	end
 end
 
-local function getStaticAnchorPart(character)
-	if not character then return nil end
-	return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
-end
-
-----------------------------------------------------
--- FILE SYSTEM (DELTA WORKSPACE STORAGE)
-----------------------------------------------------
-
-local function serializeCFrame(cf)
-	local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
-	return {x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22}
-end
-
-local function deserializeCFrame(tbl)
-	if not tbl then return CFrame.identity end
-	return CFrame.new(unpack(tbl))
-end
-
-local function serializeIncludedObjects(objectsList)
-	local out = {}
-	if type(objectsList) ~= "table" then return out end
-	for index, entry in ipairs(objectsList) do
-		local partsSerialized = {}
-		for partKey, pInfo in pairs(entry.Parts or {}) do
-			partsSerialized[partKey] = {
-				Key = pInfo.Key or partKey,
-				Name = pInfo.Name or partKey,
-				IsHandle = pInfo.IsHandle or false,
-				RootRelCFrame = serializeCFrame(pInfo.RootRelCFrame or CFrame.identity),
-				Size = {pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1},
-				MeshScale = pInfo.HasMeshScale and {pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1} or nil,
-				MeshId = pInfo.MeshId or "",
-				TextureId = pInfo.TextureId or "",
-				Color = {pInfo.ColorR or 1, pInfo.ColorG or 1, pInfo.ColorB or 1},
-				Material = pInfo.Material or "Plastic",
-				Transparency = pInfo.Transparency or 0,
-				Reflectance = pInfo.Reflectance or 0,
-				DecalTextures = pInfo.DecalTextures or {}
-			}
+local function applyPartScaleAndTransparency(part, sx, sy, sz, transp)
+	if typeof(part) ~= "Instance" or not part:IsA("BasePart") then return end
+	if isQualityVisualPart(part.Name) then
+		local mesh = part:FindFirstChildWhichIsA("SpecialMesh")
+		if mesh then
+			mesh.Scale = Vector3.new(0, 0, 0)
 		end
-		table.insert(out, {
-			UniqueId = entry.UniqueId or ("acc_" .. tostring(index)),
-			Name = entry.Name or "Accessory",
-			Parts = partsSerialized
-		})
-	end
-	return out
-end
-
-local function deserializeIncludedObjects(rawList)
-	local out = {}
-	if type(rawList) ~= "table" then return out end
-	for index, entry in ipairs(rawList) do
-		if type(entry) == "table" then
-			local partsDeserialized = {}
-			for partKey, pInfo in pairs(entry.Parts or {}) do
-				if type(pInfo) == "table" then
-					local sz = pInfo.Size or {1, 1, 1}
-					local ms = pInfo.MeshScale
-					local col = pInfo.Color or {1, 1, 1}
-					partsDeserialized[partKey] = {
-						Key = pInfo.Key or partKey,
-						Name = pInfo.Name or partKey,
-						IsHandle = pInfo.IsHandle or false,
-						RootRelCFrame = deserializeCFrame(pInfo.RootRelCFrame),
-						SizeX = sz[1] or 1,
-						SizeY = sz[2] or 1,
-						SizeZ = sz[3] or 1,
-						HasMeshScale = type(ms) == "table",
-						MeshScaleX = type(ms) == "table" and (ms[1] or 1) or 1,
-						MeshScaleY = type(ms) == "table" and (ms[2] or 1) or 1,
-						MeshScaleZ = type(ms) == "table" and (ms[3] or 1) or 1,
-						MeshId = pInfo.MeshId or "",
-						TextureId = pInfo.TextureId or "",
-						ColorR = col[1] or 1,
-						ColorG = col[2] or 1,
-						ColorB = col[3] or 1,
-						Material = pInfo.Material or "Plastic",
-						Transparency = pInfo.Transparency or 0,
-						Reflectance = pInfo.Reflectance or 0,
-						DecalTextures = type(pInfo.DecalTextures) == "table" and pInfo.DecalTextures or {}
-					}
-				end
-			end
-			table.insert(out, {
-				UniqueId = entry.UniqueId or ("acc_" .. tostring(index)),
-				Name = entry.Name or "Accessory",
-				Parts = partsDeserialized
-			})
-		end
-	end
-	return out
-end
-
-local function savePosesToFile()
-	if not writefile then return end
-	
-	pcall(function()
-		if not isfolder(FOLDER_NAME) then
-			makefolder(FOLDER_NAME)
-		end
-		
-		local serializableData = {}
-		for folderName, poses in pairs(SavedFolders) do
-			serializableData[folderName] = {}
-			for poseName, poseData in pairs(poses) do
-				serializableData[folderName][poseName] = {
-					Joints = {},
-					Exclusions = poseData.Exclusions or {},
-					IncludedObjects = serializeIncludedObjects(poseData.IncludedObjects or {}),
-					AnimOrder = poseData.AnimOrder,
-					Trigger = {
-						Enabled = poseData.Trigger and poseData.Trigger.Enabled or false,
-						MinHP = poseData.Trigger and poseData.Trigger.MinHP or 0,
-						MaxHP = poseData.Trigger and poseData.Trigger.MaxHP or 100
-					}
-				}
-				for jointName, cf in pairs(poseData.Joints) do
-					serializableData[folderName][poseName].Joints[jointName] = serializeCFrame(cf)
-				end
-			end
-		end
-		
-		writefile(FILE_NAME, HttpService:JSONEncode(serializableData))
-	end)
-end
-
-local function loadPosesFromFile()
-	if not readfile or not isfile or not isfile(FILE_NAME) then return end
-	
-	pcall(function()
-		local content = readfile(FILE_NAME)
-		local decoded = HttpService:JSONDecode(content)
-		if decoded then
-			SavedFolders = { ["Default"] = {} }
-			for folderName, poses in pairs(decoded) do
-				local normFolder = ensureFolderHierarchy(folderName)
-				for poseName, poseData in pairs(poses) do
-					local savedTrigger = poseData.Trigger or {}
-					SavedFolders[normFolder][poseName] = {
-						Joints = {},
-						Exclusions = poseData.Exclusions or {},
-						IncludedObjects = deserializeIncludedObjects(poseData.IncludedObjects),
-						AnimOrder = tonumber(poseData.AnimOrder),
-						Trigger = {
-							Enabled = false, 
-							MinHP = savedTrigger.MinHP or 0,
-							MaxHP = savedTrigger.MaxHP or 100
-						}
-					}
-					local rawJoints = poseData.Joints or poseData
-					for jointName, cfTbl in pairs(rawJoints) do
-						if jointName ~= "Exclusions" and jointName ~= "Trigger" and jointName ~= "IncludedObjects" and jointName ~= "AnimOrder" then
-							SavedFolders[normFolder][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
-						end
-					end
-				end
-			end
-		end
-	end)
-end
-
-----------------------------------------------------
--- PLAYER ACCESSORY SCANNER & STATIC FORM SPAWNER
-----------------------------------------------------
-
-local function isSpawnedPoseObject(instance)
-	for _, entry in ipairs(spawnedPoseObjects) do
-		if typeof(entry) == "Instance" and (instance == entry or instance:IsDescendantOf(entry)) then
-			return true
-		elseif type(entry) == "table" and typeof(entry.Model) == "Instance" and (instance == entry.Model or instance:IsDescendantOf(entry.Model)) then
-			return true
-		end
-	end
-	return false
-end
-
-local function scanAttachedPlayerAccessories(character)
-	if not character then return {} end
-	local anchorPart = getStaticAnchorPart(character)
-	if not anchorPart then return {} end
-
-	local anchorCF = anchorPart.CFrame
-	local collected = {}
-	local partCounter = 0
-
-	for accIndex, child in ipairs(character:GetChildren()) do
-		if child:IsA("Accessory") and not isSpawnedPoseObject(child) then
-			extractedDuplicateCounter = extractedDuplicateCounter + 1
-			local uniqueId = string.format("%s__dup_%d_%d", tostring(child.Name), accIndex, extractedDuplicateCounter)
-
-			local handle = child:FindFirstChild("Handle") or child:FindFirstChildWhichIsA("BasePart", true)
-			local partsMap = {}
-			local idx = 0
-
-			for _, desc in ipairs(child:GetDescendants()) do
-				if desc:IsA("BasePart") then
-					idx = idx + 1
-					partCounter = partCounter + 1
-					local partKey = string.format("%s__p%d_%d", desc.Name ~= "" and desc.Name or "Part", partCounter, idx)
-
-					local specialMesh = desc:FindFirstChildWhichIsA("SpecialMesh")
-					local meshId = ""
-					local textureId = ""
-					local hasMeshScale = false
-					local meshScaleX, meshScaleY, meshScaleZ = 1, 1, 1
-
-					if specialMesh then
-						meshId = normalizeAssetId(specialMesh.MeshId)
-						textureId = normalizeAssetId(specialMesh.TextureId)
-						if specialMesh.Scale then
-							hasMeshScale = true
-							meshScaleX = specialMesh.Scale.X
-							meshScaleY = specialMesh.Scale.Y
-							meshScaleZ = specialMesh.Scale.Z
-						end
-					elseif desc:IsA("MeshPart") then
-						meshId = normalizeAssetId(desc.MeshId)
-						textureId = normalizeAssetId(desc.TextureID)
-					end
-
-					local decalTextures = {}
-					for _, sub in ipairs(desc:GetChildren()) do
-						if sub:IsA("Decal") or sub:IsA("Texture") then
-							table.insert(decalTextures, {
-								ClassName = sub.ClassName,
-								Name = sub.Name,
-								Texture = normalizeAssetId(sub.Texture),
-								Face = tostring(sub.Face),
-								Transparency = sub.Transparency
-							})
-						end
-					end
-
-					local cR, cG, cB = getPartColorRGB(desc)
-					local matStr = string.gsub(tostring(desc.Material), "^Enum%.Material%.", "")
-
-					partsMap[partKey] = {
-						Key = partKey,
-						Name = desc.Name,
-						IsHandle = (handle ~= nil and desc == handle),
-						RootRelCFrame = anchorCF:ToObjectSpace(desc.CFrame),
-						SizeX = desc.Size.X,
-						SizeY = desc.Size.Y,
-						SizeZ = desc.Size.Z,
-						HasMeshScale = hasMeshScale,
-						MeshScaleX = meshScaleX,
-						MeshScaleY = meshScaleY,
-						MeshScaleZ = meshScaleZ,
-						MeshId = meshId,
-						TextureId = textureId,
-						ColorR = cR,
-						ColorG = cG,
-						ColorB = cB,
-						Material = matStr,
-						Transparency = desc.Transparency,
-						Reflectance = desc.Reflectance,
-						DecalTextures = decalTextures
-					}
-				end
-			end
-
-			if next(partsMap) ~= nil then
-				table.insert(collected, {
-					UniqueId = uniqueId,
-					Name = child.Name,
-					Parts = partsMap
-				})
-			end
-		end
-	end
-
-	return collected
-end
-
-local function clearSpawnedPoseObjects()
-	if activeObjectsFollowLoop then
-		activeObjectsFollowLoop:Disconnect()
-		activeObjectsFollowLoop = nil
-	end
-	for _, entry in ipairs(spawnedPoseObjects) do
-		if typeof(entry) == "Instance" then
-			entry:Destroy()
-		elseif type(entry) == "table" and typeof(entry.Model) == "Instance" then
-			entry.Model:Destroy()
-		end
-	end
-	spawnedPoseObjects = {}
-end
-
-local function applyStaticPartForm(part, pInfo, anchorCF)
-	local partSize = Vector3.new(pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1)
-	part.Size = partSize
-	part.CFrame = anchorCF * (pInfo.RootRelCFrame or CFrame.identity)
-
-	local specialMesh = part:FindFirstChildWhichIsA("SpecialMesh")
-	if specialMesh and pInfo.HasMeshScale then
-		specialMesh.Scale = Vector3.new(pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1)
-	end
-end
-
-local function spawnIncludedObjects(character, includedObjects)
-	clearSpawnedPoseObjects()
-	if type(includedObjects) ~= "table" or #includedObjects == 0 then return end
-
-	local anchorPart = getStaticAnchorPart(character)
-	local anchorCF = anchorPart and anchorPart.CFrame or CFrame.identity
-	local trackedParts = {}
-
-	for idx, objEntry in ipairs(includedObjects) do
-		local container = Instance.new("Model")
-		container.Name = string.format("StaticAcc_%s_%d", tostring(objEntry.Name or "Accessory"), idx)
-
-		for _, pInfo in pairs(objEntry.Parts or {}) do
-			local part = Instance.new("Part")
-			part.Name = pInfo.Name or "Part"
-			part.Anchored = true
-			part.CanCollide = false
-			part.Massless = true
-			part.Transparency = pInfo.Transparency or 0
-			part.Reflectance = pInfo.Reflectance or 0
-
-			local matEnum = Enum.Material[tostring(pInfo.Material or "Plastic")]
-			part.Material = matEnum or Enum.Material.Plastic
-			applyPartColorRGB(part, pInfo.ColorR, pInfo.ColorG, pInfo.ColorB)
-
-			local meshId = normalizeAssetId(pInfo.MeshId)
-			local textureId = normalizeAssetId(pInfo.TextureId)
-
-			if meshId ~= "" or textureId ~= "" or pInfo.HasMeshScale then
-				local sm = Instance.new("SpecialMesh")
-				sm.MeshType = meshId ~= "" and Enum.MeshType.FileMesh or Enum.MeshType.Brick
-				if meshId ~= "" then sm.MeshId = meshId end
-				if textureId ~= "" then sm.TextureId = textureId end
-				if pInfo.HasMeshScale then
-					sm.Scale = Vector3.new(pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1)
-				end
-				sm.Parent = part
-			end
-
-			for _, decInfo in ipairs(pInfo.DecalTextures or {}) do
-				local decClass = (decInfo.ClassName == "Texture") and "Texture" or "Decal"
-				local dec = Instance.new(decClass)
-				dec.Name = decInfo.Name or decClass
-				dec.Texture = normalizeAssetId(decInfo.Texture)
-				dec.Transparency = decInfo.Transparency or 0
-				local faceEnum = Enum.NormalId[tostring(decInfo.Face or "Front")]
-				if faceEnum then dec.Face = faceEnum end
-				dec.Parent = part
-			end
-
-			applyStaticPartForm(part, pInfo, anchorCF)
-			part.Parent = container
-			table.insert(trackedParts, {
-				Part = part,
-				Info = pInfo
-			})
-		end
-
-		container.Parent = workspace
-		table.insert(spawnedPoseObjects, {
-			Model = container
-		})
-	end
-
-	activeObjectsFollowLoop = RunService.Stepped:Connect(function()
-		if not character or not character.Parent then
-			clearSpawnedPoseObjects()
-			return
-		end
-		local currentAnchor = getStaticAnchorPart(character)
-		if not currentAnchor then return end
-		local currentAnchorCF = currentAnchor.CFrame
-
-		for i = #trackedParts, 1, -1 do
-			local item = trackedParts[i]
-			if item.Part and item.Part.Parent then
-				applyStaticPartForm(item.Part, item.Info, currentAnchorCF)
-			else
-				table.remove(trackedParts, i)
-			end
-		end
-	end)
-end
-
-----------------------------------------------------
--- POSE & ANIMATION HELPER FUNCTIONS
-----------------------------------------------------
-
-local function unloadPose(character)
-	if activePoseLoop then
-		activePoseLoop:Disconnect()
-		activePoseLoop = nil
-	end
-	clearSpawnedPoseObjects()
-	currentLoadedPoseIdentifier = nil
-	currentLoadedPoseEntry = nil
-
-	if character then
-		local animateScript = character:FindFirstChild("Animate")
-		if animateScript and animateScript:IsA("LocalScript") then
-			animateScript.Disabled = false
-		end
-	end
-end
-
-local function freezeAnimations(character, exclusions)
-	local animateScript = character:FindFirstChild("Animate")
-	if animateScript and animateScript:IsA("LocalScript") then
-		if next(exclusions) == nil then
-			animateScript.Disabled = true
-		end
-	end
-end
-
-local function extractPoseData(character)
-	local torso = character:FindFirstChild("Torso")
-	local humanRoot = character:FindFirstChild("HumanoidRootPart")
-	if not torso or not humanRoot then return nil end
-
-	local joints = {}
-
-	for limbName, jointName in pairs(R6_LIMB_MAP) do
-		local limb = character:FindFirstChild(limbName)
-		local parentPart = (limbName == "HumanoidRootPart") and humanRoot or torso
-		local joint = parentPart and (parentPart:FindFirstChild(jointName) or torso:FindFirstChild(jointName))
-
-		if limb and joint and joint:IsA("Motor6D") then
-			local relativeCFrame
-			if jointName == "RootJoint" then
-				relativeCFrame = humanRoot.CFrame:ToObjectSpace(torso.CFrame)
-			else
-				relativeCFrame = torso.CFrame:ToObjectSpace(limb.CFrame)
-			end
-			joints[jointName] = relativeCFrame
-		end
-	end
-
-	local capturedObjects = includeObjectsEnabled and scanAttachedPlayerAccessories(character) or {}
-
-	return {
-		Joints = joints,
-		Exclusions = {},
-		IncludedObjects = capturedObjects,
-		AnimOrder = nil,
-		Trigger = { Enabled = false, MinHP = 0, MaxHP = 100 }
-	}
-end
-
-local function applyPoseData(character, poseEntry, poseIdentifier, forceApply)
-	local torso = character:FindFirstChild("Torso")
-	local humanRoot = character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not torso or not humanRoot or not humanoid then return end
-
-	if not forceApply and currentLoadedPoseIdentifier == poseIdentifier then
-		unloadPose(character)
+		part.Size = Vector3.new(0, 0, 0)
+		part.Transparency = 0
 		return
 	end
 
-	local trigger = poseEntry.Trigger
-	if trigger and trigger.Enabled then
-		local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-		if hpPercent < trigger.MinHP or hpPercent > trigger.MaxHP then
-			return
+	local mesh = part:FindFirstChildWhichIsA("SpecialMesh")
+	if mesh then
+		mesh.Scale = Vector3.new(sx or 1, sy or 1, sz or 1)
+	else
+		part.Size = Vector3.new(sx or 1, sy or 1, sz or 1)
+	end
+	part.Transparency = normalizeTransparency(transp, part.Transparency)
+end
+
+local function getDefaultThresholdsCopy()
+	return {
+		[Config.SelectedMinor]    = DEFAULT_THRESHOLDS[Config.SelectedMinor],
+		[Config.SelectedMedium]   = DEFAULT_THRESHOLDS[Config.SelectedMedium],
+		[Config.SelectedMajor]    = DEFAULT_THRESHOLDS[Config.SelectedMajor],
+		[Config.SelectedCritical] = DEFAULT_THRESHOLDS[Config.SelectedCritical]
+	}
+end
+
+local CustomOffsets = {}
+local AssetIdsToLoad = {} 
+local ExtractedNamesToLoad = {}
+local ExtractedVisuals = {}     
+local SaveSlots = {}
+local SlotNames = {}
+local ActiveThresholds = getDefaultThresholdsCopy()
+local ActiveCustomCategories = {}
+local activeSlotKey = nil
+
+local instanceSeqCounter = 0
+local function generateUniqueItemKey(baseName)
+	instanceSeqCounter = instanceSeqCounter + 1
+	local cleanBase = (type(baseName) == "string" and baseName ~= "") and baseName or "Item"
+	return string.format("%s__inst_%d_%d", cleanBase, math.floor(os.clock() * 10000), instanceSeqCounter)
+end
+
+local function getItemKey(inst)
+	if typeof(inst) == "Instance" then
+		local attr = inst:GetAttribute("FEX_ItemKey")
+		if type(attr) == "string" and attr ~= "" then
+			return attr
 		end
 	end
+	return nil
+end
 
-	if activePoseLoop then
-		activePoseLoop:Disconnect()
-		activePoseLoop = nil
+local function setItemKey(inst, key)
+	if typeof(inst) == "Instance" and type(key) == "string" and key ~= "" then
+		inst:SetAttribute("FEX_ItemKey", key)
 	end
+end
 
-	currentLoadedPoseIdentifier = poseIdentifier
-	currentLoadedPoseEntry = poseEntry
+local lastPreset = ""
+local activeClientInstances = {}
+local isPreviewingMode = false 
+local isThresholdEditorOpen = false
+local isEffectsTabOpen = false
 
-	local poseData = poseEntry.Joints
-	local exclusions = poseEntry.Exclusions or {}
+local selectedTierName = Config.SelectedDefault
+local selectedItemKey = ""
+local selectedItemDisplayName = ""
+local selectedSubPartName = "Handle"
+local currentHighlightBox = nil
 
-	spawnIncludedObjects(character, poseEntry.IncludedObjects)
-	freezeAnimations(character, exclusions)
+local injectAssetId
 
-	activePoseLoop = RunService.Stepped:Connect(function()
-		if not character or not character.Parent or not humanoid or humanoid.Health <= 0 then
-			unloadPose(character)
-			return
+local function safeTableFind(tbl, target)
+	if type(tbl) ~= "table" or target == nil then return nil end
+	for idx, val in pairs(tbl) do
+		if typeof(val) == "Instance" and typeof(target) == "Instance" then
+			if val == target then return idx end
+		elseif tostring(val) == tostring(target) then
+			return idx
 		end
+	end
+	return nil
+end
 
-		for jointName, relativeCFrame in pairs(poseData) do
-			if not exclusions[jointName] then
-				local joint = torso:FindFirstChild(jointName) or humanRoot:FindFirstChild(jointName)
-				if joint and joint:IsA("Motor6D") then
-					joint.Transform = joint.C0:Inverse() * relativeCFrame * joint.C1
-				end
-			end
+local function syncActiveSlotData()
+	if not activeSlotKey then return end
+	local slot = SaveSlots[activeSlotKey]
+	if type(slot) == "table" and not slot.Empty then
+		slot.Thresholds = cloneTable(ActiveThresholds)
+		slot.CustomCategories = cloneTable(ActiveCustomCategories)
+	end
+end
+
+local function saveProfileData()
+	syncActiveSlotData()
+	pcall(function()
+		if writefile then
+			local package = {
+				Offsets = CustomOffsets,
+				AssetIds = AssetIdsToLoad,
+				ExtractedNames = ExtractedNamesToLoad,
+				ExtractedVisuals = ExtractedVisuals,
+				Thresholds = ActiveThresholds,
+				CustomCategories = ActiveCustomCategories,
+				Slots = SaveSlots,
+				SlotNames = SlotNames
+			}
+			writefile(FILE_NAME, HttpService:JSONEncode(package))
 		end
 	end)
 end
 
-local function movePoseToFolder(sourceFolderPath, poseName, targetFolderRaw)
-	if not SavedFolders[sourceFolderPath] or not SavedFolders[sourceFolderPath][poseName] then
-		return false
-	end
-
-	local targetFolderPath = ensureFolderHierarchy(targetFolderRaw)
-	if targetFolderPath == sourceFolderPath then
-		return true
-	end
-
-	local entry = SavedFolders[sourceFolderPath][poseName]
-	local finalPoseName = poseName
-
-	if SavedFolders[targetFolderPath][finalPoseName] then
-		local suffix = 2
-		while SavedFolders[targetFolderPath][poseName .. "_" .. tostring(suffix)] do
-			suffix = suffix + 1
+local function loadProfileData()
+	local success, result = pcall(function()
+		if readfile and isfile and isfile(FILE_NAME) then
+			return readfile(FILE_NAME)
 		end
-		finalPoseName = poseName .. "_" .. tostring(suffix)
-	end
+		return nil
+	end)
+	
+	if success and result and type(result) == "string" then
+		local successParse, parsedData = pcall(function()
+			return HttpService:JSONDecode(result)
+		end)
+		
+		if successParse and type(parsedData) == "table" then
+			CustomOffsets = type(parsedData.Offsets) == "table" and parsedData.Offsets or {}
+			AssetIdsToLoad = type(parsedData.AssetIds) == "table" and parsedData.AssetIds or {}
+			ExtractedNamesToLoad = type(parsedData.ExtractedNames) == "table" and parsedData.ExtractedNames or {}
+			ExtractedVisuals = type(parsedData.ExtractedVisuals) == "table" and parsedData.ExtractedVisuals or {}
+			SaveSlots = type(parsedData.Slots) == "table" and parsedData.Slots or {}
+			SlotNames = type(parsedData.SlotNames) == "table" and parsedData.SlotNames or {}
 
-	SavedFolders[targetFolderPath][finalPoseName] = entry
-	SavedFolders[sourceFolderPath][poseName] = nil
-
-	local oldId = sourceFolderPath .. "/" .. poseName
-	local newId = targetFolderPath .. "/" .. finalPoseName
-	if currentLoadedPoseIdentifier == oldId then
-		currentLoadedPoseIdentifier = newId
-	end
-
-	savePosesToFile()
-	if refreshList then
-		refreshList()
-	end
-	return true
-end
-
-----------------------------------------------------
--- ORDERED POSE ANIMATION RUNNER (LOOPS TO HIGHEST NUMBER)
-----------------------------------------------------
-
-local function stopAnimationSequence(resetPose)
-	activeAnimationToken = activeAnimationToken + 1
-	activeAnimationPlaying = false
-	if resetPose and LocalPlayer.Character then
-		unloadPose(LocalPlayer.Character)
-	end
-end
-
-local function getOrderedPoseSteps()
-	local steps = {}
-	local highestOrder = 0
-
-	for folderName, poses in pairs(SavedFolders) do
-		for poseName, poseEntry in pairs(poses) do
-			local orderNum = tonumber(poseEntry.AnimOrder)
-			if orderNum and orderNum >= 1 then
-				local intOrder = math.floor(orderNum)
-				if intOrder > highestOrder then
-					highestOrder = intOrder
+			ActiveThresholds = getDefaultThresholdsCopy()
+			if type(parsedData.Thresholds) == "table" then
+				for k, v in pairs(parsedData.Thresholds) do
+					local keyStr = tostring(k)
+					ActiveThresholds[keyStr] = normalizeThreshold(v, ActiveThresholds[keyStr] or 0.5)
 				end
-				table.insert(steps, {
-					Order = intOrder,
-					FolderName = folderName,
-					PoseName = poseName,
-					PoseEntry = poseEntry,
-					Identifier = folderName .. "/" .. poseName
-				})
+			end
+
+			ActiveCustomCategories = {}
+			if type(parsedData.CustomCategories) == "table" then
+				for _, cat in ipairs(parsedData.CustomCategories) do
+					if type(cat) == "table" and type(cat.Name) == "string" and cat.Name ~= "" then
+						table.insert(ActiveCustomCategories, {
+							Name = cat.Name,
+							MaxRatio = normalizeThreshold(cat.MaxRatio, 0.5)
+						})
+					end
+				end
+			end
+			return
+		end
+	end
+end
+
+loadProfileData()
+
+local function getSaveSlotCount()
+	local maxSlot = 0
+	for slotKey, _ in pairs(SaveSlots) do
+		local numericKey = tonumber(slotKey)
+		if numericKey and numericKey > maxSlot then
+			maxSlot = numericKey
+		end
+	end
+	return math.max(maxSlot, 5)
+end
+
+local function ensureSaveSlot(slotNumber)
+	local slotKey = tostring(slotNumber)
+	if SaveSlots[slotKey] == nil and SaveSlots[slotNumber] == nil then
+		SaveSlots[slotKey] = {
+			Empty = true,
+			Thresholds = getDefaultThresholdsCopy(),
+			CustomCategories = {}
+		}
+	elseif SaveSlots[slotNumber] ~= nil and SaveSlots[slotKey] == nil then
+		SaveSlots[slotKey] = SaveSlots[slotNumber]
+		SaveSlots[slotNumber] = nil
+	end
+
+	if type(SaveSlots[slotKey]) == "table" then
+		if type(SaveSlots[slotKey].Thresholds) ~= "table" then
+			SaveSlots[slotKey].Thresholds = getDefaultThresholdsCopy()
+		end
+		if type(SaveSlots[slotKey].CustomCategories) ~= "table" then
+			SaveSlots[slotKey].CustomCategories = {}
+		end
+	end
+
+	if SlotNames[slotKey] == nil and SlotNames[slotNumber] == nil then
+		SlotNames[slotKey] = "SLOT " .. slotKey
+	elseif SlotNames[slotNumber] ~= nil and SlotNames[slotKey] == nil then
+		SlotNames[slotKey] = SlotNames[slotNumber]
+		SlotNames[slotNumber] = nil
+	end
+end
+
+for i = 1, 5 do ensureSaveSlot(i) end
+
+local TargetPresetFolder = ReplicatedStorage:FindFirstChild("FaceAccPresets")
+if not TargetPresetFolder then
+	TargetPresetFolder = Instance.new("Folder")
+	TargetPresetFolder.Name = "FaceAccPresets"
+	TargetPresetFolder.Parent = ReplicatedStorage
+end
+
+local function ensureSubFolder(name)
+	if type(name) ~= "string" or name == "" then return end
+	if not TargetPresetFolder:FindFirstChild(name) then
+		local subFolder = Instance.new("Folder")
+		subFolder.Name = name
+		subFolder.Parent = TargetPresetFolder
+	end
+
+	if not CustomOffsets[name] or type(CustomOffsets[name]) ~= "table" then CustomOffsets[name] = {} end
+	if not AssetIdsToLoad[name] or type(AssetIdsToLoad[name]) ~= "table" then AssetIdsToLoad[name] = {} end
+	if not ExtractedNamesToLoad[name] or type(ExtractedNamesToLoad[name]) ~= "table" then ExtractedNamesToLoad[name] = {} end
+	if not ExtractedVisuals[name] or type(ExtractedVisuals[name]) ~= "table" then ExtractedVisuals[name] = {} end
+end
+
+local function getAllTierNames()
+	local list = {
+		Config.SelectedDefault,
+		Config.SelectedMinor,
+		Config.SelectedMedium,
+		Config.SelectedMajor,
+		Config.SelectedCritical
+	}
+	local seen = {}
+	for _, n in ipairs(list) do
+		seen[n] = true
+	end
+	for _, cat in ipairs(ActiveCustomCategories) do
+		if type(cat) == "table" and type(cat.Name) == "string" and cat.Name ~= "" and not seen[cat.Name] then
+			seen[cat.Name] = true
+			table.insert(list, cat.Name)
+		end
+	end
+	return list
+end
+
+local function ensureDirectoryStructure()
+	for _, tier in ipairs(getAllTierNames()) do
+		ensureSubFolder(tier)
+	end
+end
+
+ensureDirectoryStructure()
+
+local function initializeItemData(tierName, item, explicitKey)
+	if typeof(item) ~= "Instance" then return nil end
+	ensureSubFolder(tierName)
+	local itemKey = explicitKey or getItemKey(item) or generateUniqueItemKey(item.Name)
+	setItemKey(item, itemKey)
+
+	if CustomOffsets[tierName][itemKey] then
+		for partName, pData in pairs(CustomOffsets[tierName][itemKey]) do
+			if type(pData) == "table" and isQualityVisualPart(partName) then
+				pData.scaleX = 0
+				pData.scaleY = 0
+				pData.scaleZ = 0
+				pData.transparency = 0
+			end
+		end
+		return itemKey
+	end
+	
+	local itemProfile = {}
+	local handle = item:FindFirstChild("Handle") or item:FindFirstChildWhichIsA("BasePart", true)
+	if not handle and item:IsA("Model") and item.PrimaryPart then handle = item.PrimaryPart end
+	
+	if handle then
+		handle.Name = "Handle"
+		local hR, hG, hB = getPartInitialColor(handle)
+		itemProfile["Handle"] = {
+			offsetX = 0, offsetY = 0, offsetZ = 0, 
+			rotateX = 0, rotateY = 0, rotateZ = 0, 
+			scaleX = 1, scaleY = 1, scaleZ = 1,
+			colorR = hR, colorG = hG, colorB = hB,
+			transparency = normalizeTransparency(handle.Transparency, 0)
+		}
+		
+		local partCounter = 1
+		for _, child in ipairs(item:GetDescendants()) do
+			if child:IsA("BasePart") and child ~= handle then
+				if child.Name == "Part" or child.Name == "MeshPart" or child.Name == "" then
+					child.Name = "Component_" .. tostring(partCounter)
+					partCounter = partCounter + 1
+				end
+
+				local isQV = isQualityVisualPart(child.Name)
+				local defaultX, defaultY, defaultZ = 1, 1, 1
+				if isQV then
+					defaultX, defaultY, defaultZ = 0, 0, 0
+				else
+					local mesh = child:FindFirstChildWhichIsA("SpecialMesh")
+					if mesh then
+						defaultX, defaultY, defaultZ = mesh.Scale.X, mesh.Scale.Y, mesh.Scale.Z
+					else
+						defaultX, defaultY, defaultZ = child.Size.X, child.Size.Y, child.Size.Z
+					end
+				end
+
+				local cR, cG, cB = getPartInitialColor(child)
+				
+				itemProfile[child.Name] = {
+					offsetX = 0, offsetY = 0, offsetZ = 0,
+					rotateX = 0, rotateY = 0, rotateZ = 0,
+					scaleX = defaultX, scaleY = defaultY, scaleZ = defaultZ,
+					colorR = cR, colorG = cG, colorB = cB,
+					transparency = isQV and 0 or normalizeTransparency(child.Transparency, 0)
+				}
 			end
 		end
 	end
 
-	table.sort(steps, function(a, b)
-		if a.Order ~= b.Order then
-			return a.Order < b.Order
-		end
-		if a.FolderName ~= b.FolderName then
-			return a.FolderName < b.FolderName
-		end
-		return a.PoseName < b.PoseName
-	end)
-
-	return steps, highestOrder
+	CustomOffsets[tierName][itemKey] = itemProfile
+	saveProfileData()
+	return itemKey
 end
 
-local function startAnimationSequence()
-	stopAnimationSequence(false)
-	local steps, highestOrder = getOrderedPoseSteps()
-	if #steps == 0 or highestOrder < 1 then return end
+local function clearActiveHighlight()
+	if currentHighlightBox then
+		currentHighlightBox:Destroy()
+		currentHighlightBox = nil
+	end
+end
 
-	activeAnimationToken = activeAnimationToken + 1
-	local myToken = activeAnimationToken
-	activeAnimationPlaying = true
+local function highlightSelectedSubPart()
+	clearActiveHighlight()
+	local character = LocalPlayer.Character
+	if not character or selectedItemKey == "" then return end
+	
+	for _, inst in ipairs(activeClientInstances) do
+		if typeof(inst) == "Instance" and inst.Parent and getItemKey(inst) == selectedItemKey then
+			local targetPartInstance = (inst:IsA("BasePart") and inst.Name == selectedSubPartName) and inst or inst:FindFirstChild(selectedSubPartName, true)
 
-	task.spawn(function()
-		while animationModeEnabled and activeAnimationToken == myToken do
-			local currentSteps, currentMaxOrder = getOrderedPoseSteps()
-			if #currentSteps == 0 or currentMaxOrder < 1 then
+			if not targetPartInstance then
+				for _, d in ipairs(inst:GetDescendants()) do
+					if d:IsA("BasePart") and d.Name == selectedSubPartName then
+						targetPartInstance = d
+						break
+					end
+				end
+			end
+			
+			if targetPartInstance and targetPartInstance:IsA("BasePart") then
+				local selectionBox = Instance.new("SelectionBox")
+				selectionBox.Name = "Customizer_PartHighlight"
+				selectionBox.Color3 = Color3.fromRGB(0, 255, 255)
+				selectionBox.LineThickness = 0.04
+				selectionBox.Adornee = targetPartInstance
+				selectionBox.Parent = targetPartInstance
+				currentHighlightBox = selectionBox
 				break
 			end
-
-			for _, step in ipairs(currentSteps) do
-				if not animationModeEnabled or activeAnimationToken ~= myToken then
-					return
-				end
-
-				local char = LocalPlayer.Character
-				if not char or not char.Parent then
-					break
-				end
-
-				applyPoseData(char, step.PoseEntry, step.Identifier, true)
-				if refreshList then
-					refreshList()
-				end
-
-				local waitTime = math.max(0, tonumber(animationDelaySeconds) or 0)
-				local elapsed = 0
-				while elapsed < waitTime do
-					if not animationModeEnabled or activeAnimationToken ~= myToken then
-						return
-					end
-					local dt = task.wait(0.05)
-					elapsed = elapsed + dt
-				end
-			end
 		end
-
-		if activeAnimationToken == myToken then
-			activeAnimationPlaying = false
-			if LocalPlayer.Character then
-				unloadPose(LocalPlayer.Character)
-			end
-			if refreshList then
-				refreshList()
-			end
-		end
-	end)
+	end
 end
 
-----------------------------------------------------
--- BACKGROUND AUTOMATIC HP TRIGGER SCANNER
-----------------------------------------------------
-RunService.Stepped:Connect(function()
-	if activeAnimationPlaying then return end
+local function localAttach(character, tierName, item)
+	if typeof(item) ~= "Instance" then return end
+	local head = character:WaitForChild("Head", 5)
+	if not head then return end
 
-	local char = LocalPlayer.Character
-	if not char then return end
-	local humanoid = char:FindFirstChildOfClass("Humanoid")
-	if not humanoid or humanoid.Health <= 0 then return end
+	local itemKey = initializeItemData(tierName, item, getItemKey(item))
+	if not itemKey then return end
 
-	local hpPercent = (humanoid.Health / humanoid.MaxHealth) * 100
-	local targetPoseToLoad = nil
-	local targetPoseId = nil
+	local itemData = CustomOffsets[tierName] and CustomOffsets[tierName][itemKey]
+	if not itemData then return end
+	
+	local clone = item:Clone()
+	setItemKey(clone, itemKey)
 
-	for folderName, poses in pairs(SavedFolders) do
-		for poseName, poseEntry in pairs(poses) do
-			local trig = poseEntry.Trigger
-			if trig and trig.Enabled then
-				if hpPercent >= trig.MinHP and hpPercent <= trig.MaxHP then
-					targetPoseToLoad = poseEntry
-					targetPoseId = folderName .. "/" .. poseName
-					break
-				end
+	local handle = clone.Name == "Handle" and clone or clone:FindFirstChild("Handle") or clone:FindFirstChildWhichIsA("BasePart", true)
+	if not handle and clone:IsA("Model") and clone.PrimaryPart then handle = clone.PrimaryPart end
+	if not handle then return end
+	
+	handle.Name = "Handle"
+	
+	for _, child in ipairs(clone:GetDescendants()) do
+		if child:IsA("Weld") or child:IsA("ManualWeld") or child:IsA("WeldConstraint") or child:IsA("Attachment") or child:IsA("RigidConstraint") then
+			child:Destroy()
+		end
+	end
+	
+	local structuralOffsets = {}
+	local partCounter = 1
+	
+	for _, obj in ipairs(clone:GetDescendants()) do
+		if obj:IsA("BasePart") and obj ~= handle then
+			if obj.Name == "Part" or obj.Name == "MeshPart" or obj.Name == "" then
+				obj.Name = "Component_" .. tostring(partCounter)
+				partCounter = partCounter + 1
+			end
+			
+			structuralOffsets[obj.Name] = handle.CFrame:ToObjectSpace(obj.CFrame)
+			obj.Anchored = false
+			obj.CanCollide = false
+			obj.Massless = true
+			
+			local pData = itemData[obj.Name]
+			if pData then
+				applyPartScaleAndTransparency(obj, pData.scaleX or 1, pData.scaleY or 1, pData.scaleZ or 1, pData.transparency)
+				applyPartColor(obj, pData.colorR, pData.colorG, pData.colorB)
+			elseif isQualityVisualPart(obj.Name) then
+				applyPartScaleAndTransparency(obj, 0, 0, 0, 0)
 			end
 		end
-		if targetPoseToLoad then break end
+	end
+	
+	handle.Anchored = false
+	handle.CanCollide = false
+	handle.Massless = true
+
+	local rootData = itemData["Handle"] or { offsetX = 0, offsetY = 0, offsetZ = 0, rotateX = 0, rotateY = 0, rotateZ = 0, scaleX = 1, scaleY = 1, scaleZ = 1, colorR = handle.Color.R, colorG = handle.Color.G, colorB = handle.Color.B, transparency = 0 }
+	applyPartScaleAndTransparency(handle, rootData.scaleX or 1, rootData.scaleY or 1, rootData.scaleZ or 1, rootData.transparency)
+	applyPartColor(handle, rootData.colorR, rootData.colorG, rootData.colorB)
+
+	for _, obj in ipairs(clone:GetDescendants()) do
+		if obj:IsA("BasePart") and obj ~= handle then
+			local pData = itemData[obj.Name] or { offsetX = 0, offsetY = 0, offsetZ = 0, rotateX = 0, rotateY = 0, rotateZ = 0 }
+			local innerWeld = Instance.new("Weld")
+			innerWeld.Name = "ModelInnerWeld"
+			innerWeld.Part0 = obj
+			innerWeld.Part1 = handle
+			
+			local originalLocalCFrame = structuralOffsets[obj.Name] or CFrame.new()
+			local customPosOffset = CFrame.new(pData.offsetX or 0, pData.offsetY or 0, pData.offsetZ or 0)
+			local customRotOffset = CFrame.Angles(math.rad(pData.rotateX or 0), math.rad(pData.rotateY or 0), math.rad(pData.rotateZ or 0))
+			
+			innerWeld.C0 = originalLocalCFrame:Inverse() * customPosOffset * customRotOffset
+			innerWeld.Parent = obj
+		end
 	end
 
-	if targetPoseToLoad then
-		if currentLoadedPoseIdentifier ~= targetPoseId then
-			applyPoseData(char, targetPoseToLoad, targetPoseId)
-		end
+	local accessory = clone:IsA("Accessory") and clone or Instance.new("Accessory")
+	if not clone:IsA("Accessory") then
+		accessory.Name = item.Name
+		clone.Parent = accessory
 	else
-		if currentLoadedPoseIdentifier then
-			local foundFolder, foundName = currentLoadedPoseIdentifier:match("^(.+)/([^/]+)$")
-			if foundFolder and SavedFolders[foundFolder] and SavedFolders[foundFolder][foundName] then
-				local activeEntry = SavedFolders[foundFolder][foundName]
-				if activeEntry.Trigger and activeEntry.Trigger.Enabled then
-					if hpPercent < activeEntry.Trigger.MinHP or hpPercent > activeEntry.Trigger.MaxHP then
-						unloadPose(char)
-					end
+		accessory.Name = item.Name
+	end
+	setItemKey(accessory, itemKey)
+	
+	local rootWeld = Instance.new("Weld")
+	rootWeld.Name = "AccessoryWeld"
+	rootWeld.Part0 = head
+	rootWeld.Part1 = handle
+	
+	local positionOffset = CFrame.new(rootData.offsetX or 0, rootData.offsetY or 0, rootData.offsetZ or 0)
+	local rotationOffset = CFrame.Angles(math.rad(rootData.rotateX or 0), math.rad(rootData.rotateY or 0), math.rad(rootData.rotateZ or 0))
+	
+	rootWeld.C0 = positionOffset * rotationOffset
+	rootWeld.Parent = handle
+	
+	accessory.Parent = character
+	table.insert(activeClientInstances, accessory)
+end
+
+local function clearActiveItems()
+	clearActiveHighlight()
+	for _, item in ipairs(activeClientInstances) do
+		if typeof(item) == "Instance" then
+			item:Destroy()
+		end
+	end
+	activeClientInstances = {}
+end
+
+local function applyPreset(character, folderName)
+	clearActiveItems()
+	if folderName == "" or folderName == "None" then return end
+	
+	local folder = TargetPresetFolder:FindFirstChild(folderName)
+	if not folder then return end
+	
+	for _, item in ipairs(folder:GetChildren()) do
+		if typeof(item) == "Instance" then
+			task.spawn(localAttach, character, folderName, item)
+		end
+	end
+	task.defer(highlightSelectedSubPart)
+end
+
+local function resolveHealthPreset(ratio)
+	local target = Config.SelectedDefault
+	local matchedThreshold = math.huge
+
+	for tierName, thresholdVal in pairs(ActiveThresholds) do
+		if tierName ~= Config.SelectedDefault and not isNilThreshold(thresholdVal) then
+			local maxR = tonumber(thresholdVal)
+			if maxR then
+				maxR = math.clamp(maxR > 1 and (maxR / 100) or maxR, 0, 1)
+				if ratio <= maxR and maxR < matchedThreshold then
+					matchedThreshold = maxR
+					target = tierName
 				end
 			end
 		end
 	end
-end)
 
-----------------------------------------------------
--- DRAGGABLE GUI HELPER (Touch & Mouse Support)
-----------------------------------------------------
+	for _, cat in ipairs(ActiveCustomCategories) do
+		if type(cat) == "table" and type(cat.Name) == "string" and cat.Name ~= "" and not isNilThreshold(cat.MaxRatio) then
+			local maxR = tonumber(cat.MaxRatio)
+			if maxR then
+				maxR = math.clamp(maxR > 1 and (maxR / 100) or maxR, 0, 1)
+				if ratio <= maxR and maxR < matchedThreshold then
+					matchedThreshold = maxR
+					target = cat.Name
+				end
+			end
+		end
+	end
 
-local function makeDraggable(frame, dragHandle)
-	dragHandle = dragHandle or frame
-	local dragging = false
-	local dragInput, dragStart, startPos
+	return target
+end
 
-	dragHandle.InputBegan:Connect(function(input)
+local function forceRecalculateHealthPreset(character)
+	if isPreviewingMode then return end
+	local humanoid = character:FindFirstChild("Humanoid")
+	if not humanoid or humanoid.MaxHealth <= 0 then return end
+	
+	local ratio = humanoid.Health / humanoid.MaxHealth
+	local target = resolveHealthPreset(ratio)
+	
+	lastPreset = target
+	applyPreset(character, target)
+end
+
+local function monitorHealth(character)
+	local humanoid = character:WaitForChild("Humanoid")
+	humanoid.HealthChanged:Connect(function() forceRecalculateHealthPreset(character) end)
+	forceRecalculateHealthPreset(character)
+end
+
+local function generateExtractedPlaceholderModel(tierName, itemName, explicitKey)
+	if type(itemName) ~= "string" or itemName == "" then return nil end
+	local folder = TargetPresetFolder:FindFirstChild(tierName)
+	if not folder then return nil end
+
+	local lookupKey = explicitKey or itemName
+	local visualProfile = ExtractedVisuals[tierName] and (ExtractedVisuals[tierName][lookupKey] or ExtractedVisuals[tierName][itemName])
+	if not visualProfile or type(visualProfile) ~= "table" then return nil end
+	
+	local fakeAccessory = Instance.new("Accessory")
+	fakeAccessory.Name = itemName
+	setItemKey(fakeAccessory, explicitKey or generateUniqueItemKey(itemName))
+	local handlePart = nil
+	
+	for partName, visualData in pairs(visualProfile) do
+		if type(visualData) == "table" then
+			local isQV = isQualityVisualPart(partName)
+			local part = Instance.new("Part")
+			part.Name = partName
+			part.Transparency = isQV and 0 or (visualData.Transparency or 0)
+			part.Reflectance = visualData.Reflectance or 0
+			
+			local mat = visualData.Material
+			if type(mat) == "string" then
+				mat = string.gsub(mat, "^Enum%.Material%.", "")
+				part.Material = Enum.Material[mat] or Enum.Material.Plastic
+			else
+				part.Material = Enum.Material.Plastic
+			end
+			
+			if visualData.ColorR and visualData.ColorG and visualData.ColorB then
+				part.Color = Color3.new(visualData.ColorR, visualData.ColorG, visualData.ColorB)
+			end
+			
+			if isQV then
+				part.Size = Vector3.new(0, 0, 0)
+			else
+				part.Size = Vector3.new(visualData.SizeX or 1, visualData.SizeY or 1, visualData.SizeZ or 1)
+			end
+			
+			local sm = Instance.new("SpecialMesh")
+			sm.MeshType = Enum.MeshType.FileMesh
+			
+			local rawMesh = visualData.MeshId and tostring(visualData.MeshId) or ""
+			local rawTexture = visualData.TextureId and tostring(visualData.TextureId) or ""
+			
+			sm.MeshId = string.match(rawMesh, "^%d+$") and ("rbxassetid://" .. rawMesh) or rawMesh
+			sm.TextureId = string.match(rawTexture, "^%d+$") and ("rbxassetid://" .. rawTexture) or rawTexture
+			sm.Scale = isQV and Vector3.new(0, 0, 0) or Vector3.new(1, 1, 1)
+			sm.Parent = part
+			part.Parent = fakeAccessory
+			
+			if partName == "Handle" then handlePart = part end
+		end
+	end
+	
+	if not handlePart then
+		local backupHandle = fakeAccessory:FindFirstChildWhichIsA("BasePart")
+		if backupHandle then backupHandle.Name = "Handle" end
+	end
+	
+	fakeAccessory.Parent = folder
+	return fakeAccessory
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "FaceAccMobileUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end)
+if not ScreenGui.Parent then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+local function makeMobileDraggable(guiObject)
+	local dragging, dragInput, dragStart, startPos
+	guiObject.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			dragStart = input.Position
-			startPos = frame.Position
-
+			startPos = guiObject.Position
 			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
+				if input.UserInputState == Enum.UserInputState.End then dragging = false end
 			end)
 		end
 	end)
-
-	dragHandle.InputChanged:Connect(function(input)
+	guiObject.InputChanged:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
 			dragInput = input
 		end
 	end)
-
 	UserInputService.InputChanged:Connect(function(input)
 		if input == dragInput and dragging then
 			local delta = input.Position - dragStart
-			frame.Position = UDim2.new(
-				startPos.X.Scale,
-				startPos.X.Offset + delta.X,
-				startPos.Y.Scale,
-				startPos.Y.Offset + delta.Y
-			)
+			guiObject.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
 	end)
 end
 
-----------------------------------------------------
--- UI CREATION
-----------------------------------------------------
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 610, 0, 320)
+MainFrame.Position = UDim2.new(0.5, -305, 0.4, -160)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+MainFrame.BorderSizePixel = 0
+MainFrame.Visible = false
+MainFrame.Active = true
+MainFrame.Parent = ScreenGui
 
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "R6PoseManagerGui"
-screenGui.ResetOnSpawn = false
-screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 12)
+MainCorner.Parent = MainFrame
+makeMobileDraggable(MainFrame)
 
--- Toggle Button
-local toggleBtn = Instance.new("TextButton")
-toggleBtn.Name = "ToggleBtn"
-toggleBtn.Size = UDim2.new(0, 100, 0, 40)
-toggleBtn.Position = UDim2.new(0.02, 0, 0.2, 0)
-toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
-toggleBtn.Text = "Pose UI"
-toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-toggleBtn.TextSize = 16
-toggleBtn.Font = Enum.Font.SourceSansBold
-toggleBtn.Parent = screenGui
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Name = "FEXTToggle"
+ToggleButton.Size = UDim2.new(0, 60, 0, 60)
+ToggleButton.Position = UDim2.new(0.1, 0, 0.3, 0)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+ToggleButton.BorderSizePixel = 0
+ToggleButton.Font = Enum.Font.GothamBold
+ToggleButton.Text = "FEX"
+ToggleButton.TextColor3 = Color3.fromRGB(0, 255, 150)
+ToggleButton.TextSize = 16
+ToggleButton.Active = true
+ToggleButton.Parent = ScreenGui
 
-local toggleCorner = Instance.new("UICorner")
-toggleCorner.CornerRadius = UDim.new(0, 8)
-toggleCorner.Parent = toggleBtn
+local CircleCorner = Instance.new("UICorner")
+CircleCorner.CornerRadius = UDim.new(1, 0)
+CircleCorner.Parent = ToggleButton
 
-makeDraggable(toggleBtn)
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.fromRGB(0, 255, 150)
+UIStroke.Thickness = 2
+UIStroke.Parent = ToggleButton
+makeMobileDraggable(ToggleButton)
 
--- Main Frame
-local mainFrame = Instance.new("Frame")
-mainFrame.Name = "MainFrame"
-mainFrame.Size = UDim2.new(0, 320, 0, 475)
-mainFrame.Position = UDim2.new(0.5, -160, 0.5, -237)
-mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
-mainFrame.BorderSizePixel = 0
-mainFrame.Visible = false
-mainFrame.Parent = screenGui
-
-local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 10)
-mainCorner.Parent = mainFrame
-
--- Title Header
-local title = Instance.new("TextLabel")
-title.Name = "Header"
-title.Size = UDim2.new(1, 0, 0, 32)
-title.BackgroundTransparency = 1
-title.Text = "R6 Pose Manager (Drag Here)"
-title.TextColor3 = Color3.fromRGB(255, 255, 255)
-title.TextSize = 16
-title.Font = Enum.Font.SourceSansBold
-title.Parent = mainFrame
-
-makeDraggable(mainFrame, title)
-
--- Top Row: Include objects button + Animation button next to it
-local topControlsRow = Instance.new("Frame")
-topControlsRow.Name = "TopControlsRow"
-topControlsRow.Size = UDim2.new(0.9, 0, 0, 26)
-topControlsRow.Position = UDim2.new(0.05, 0, 0, 34)
-topControlsRow.BackgroundTransparency = 1
-topControlsRow.Parent = mainFrame
-
-local includeObjectsBtn = Instance.new("TextButton")
-includeObjectsBtn.Name = "IncludeObjectsCheckbox"
-includeObjectsBtn.Size = UDim2.new(0.62, -3, 1, 0)
-includeObjectsBtn.Position = UDim2.new(0, 0, 0, 0)
-includeObjectsBtn.BackgroundColor3 = Color3.fromRGB(38, 38, 48)
-includeObjectsBtn.BorderSizePixel = 0
-includeObjectsBtn.Text = ""
-includeObjectsBtn.Parent = topControlsRow
-
-local incObjCorner = Instance.new("UICorner")
-incObjCorner.CornerRadius = UDim.new(0, 6)
-incObjCorner.Parent = includeObjectsBtn
-
-local includeObjectsBox = Instance.new("TextLabel")
-includeObjectsBox.Size = UDim2.new(0, 18, 0, 18)
-includeObjectsBox.Position = UDim2.new(0, 6, 0.5, -9)
-includeObjectsBox.BackgroundColor3 = Color3.fromRGB(55, 55, 68)
-includeObjectsBox.Text = ""
-includeObjectsBox.TextColor3 = Color3.fromRGB(0, 255, 130)
-includeObjectsBox.Font = Enum.Font.SourceSansBold
-includeObjectsBox.TextSize = 14
-includeObjectsBox.Parent = includeObjectsBtn
-
-local incBoxCorner = Instance.new("UICorner")
-incBoxCorner.CornerRadius = UDim.new(0, 4)
-incBoxCorner.Parent = includeObjectsBox
-
-local includeObjectsLabel = Instance.new("TextLabel")
-includeObjectsLabel.Size = UDim2.new(1, -30, 1, 0)
-includeObjectsLabel.Position = UDim2.new(0, 28, 0, 0)
-includeObjectsLabel.BackgroundTransparency = 1
-includeObjectsLabel.Text = "Include objects"
-includeObjectsLabel.TextColor3 = Color3.fromRGB(225, 225, 235)
-includeObjectsLabel.TextXAlignment = Enum.TextXAlignment.Left
-includeObjectsLabel.Font = Enum.Font.SourceSansBold
-includeObjectsLabel.TextSize = 13
-includeObjectsLabel.TextTruncate = Enum.TextTruncate.AtEnd
-includeObjectsLabel.Parent = includeObjectsBtn
-
-includeObjectsBtn.MouseButton1Click:Connect(function()
-	includeObjectsEnabled = not includeObjectsEnabled
-	includeObjectsBox.Text = includeObjectsEnabled and "✓" or ""
-	includeObjectsBox.BackgroundColor3 = includeObjectsEnabled and Color3.fromRGB(0, 130, 70) or Color3.fromRGB(55, 55, 68)
+ToggleButton.Activated:Connect(function()
+	MainFrame.Visible = not MainFrame.Visible
+	if MainFrame.Visible then highlightSelectedSubPart() else clearActiveHighlight() end
 end)
 
-local animationBtn = Instance.new("TextButton")
-animationBtn.Name = "AnimationButton"
-animationBtn.Size = UDim2.new(0.38, -3, 1, 0)
-animationBtn.Position = UDim2.new(0.62, 6, 0, 0)
-animationBtn.BackgroundColor3 = Color3.fromRGB(75, 55, 115)
-animationBtn.BorderSizePixel = 0
-animationBtn.Text = "Animation"
-animationBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-animationBtn.Font = Enum.Font.SourceSansBold
-animationBtn.TextSize = 13
-animationBtn.Parent = topControlsRow
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -260, 0, 35)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.Text = "MODEL CONFIGURATION & SLOT THRESHOLDS PANEL"
+TitleLabel.TextColor3 = Color3.fromRGB(240, 240, 245)
+TitleLabel.TextSize = 11
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Position = UDim2.new(0, 15, 0, 0)
+TitleLabel.Parent = MainFrame
 
-local animBtnCorner = Instance.new("UICorner")
-animBtnCorner.CornerRadius = UDim.new(0, 6)
-animBtnCorner.Parent = animationBtn
+local ThresholdsModeBtn = Instance.new("TextButton")
+ThresholdsModeBtn.Size = UDim2.new(0, 115, 0, 24)
+ThresholdsModeBtn.Position = UDim2.new(1, -235, 0, 6)
+ThresholdsModeBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 65)
+ThresholdsModeBtn.Font = Enum.Font.GothamBold
+ThresholdsModeBtn.Text = "THRESHOLDS: OFF"
+ThresholdsModeBtn.TextColor3 = Color3.fromRGB(180, 210, 255)
+ThresholdsModeBtn.TextSize = 9
+ThresholdsModeBtn.Parent = MainFrame
 
--- Delay (Seconds) Row (Created/shown when Animation is clicked)
-local delayRow = Instance.new("Frame")
-delayRow.Name = "DelayRow"
-delayRow.Size = UDim2.new(0.9, 0, 0, 26)
-delayRow.Position = UDim2.new(0.05, 0, 0, 64)
-delayRow.BackgroundColor3 = Color3.fromRGB(34, 34, 44)
-delayRow.BorderSizePixel = 0
-delayRow.Visible = false
-delayRow.Parent = mainFrame
+local ThreshBtnCorner = Instance.new("UICorner")
+ThreshBtnCorner.CornerRadius = UDim.new(0, 4)
+ThreshBtnCorner.Parent = ThresholdsModeBtn
 
-local delayRowCorner = Instance.new("UICorner")
-delayRowCorner.CornerRadius = UDim.new(0, 6)
-delayRowCorner.Parent = delayRow
+local PreviewToggleBtn = Instance.new("TextButton")
+PreviewToggleBtn.Size = UDim2.new(0, 100, 0, 24)
+PreviewToggleBtn.Position = UDim2.new(1, -115, 0, 6)
+PreviewToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 35, 35)
+PreviewToggleBtn.Font = Enum.Font.GothamBold
+PreviewToggleBtn.Text = "PREVIEW: OFF"
+PreviewToggleBtn.TextColor3 = Color3.fromRGB(240, 90, 90)
+PreviewToggleBtn.TextSize = 10
+PreviewToggleBtn.Parent = MainFrame
 
-local delayLabel = Instance.new("TextLabel")
-delayLabel.Size = UDim2.new(0.58, 0, 1, 0)
-delayLabel.Position = UDim2.new(0, 8, 0, 0)
-delayLabel.BackgroundTransparency = 1
-delayLabel.Text = "Delay,(Seconds)"
-delayLabel.TextColor3 = Color3.fromRGB(220, 220, 235)
-delayLabel.TextXAlignment = Enum.TextXAlignment.Left
-delayLabel.Font = Enum.Font.SourceSansBold
-delayLabel.TextSize = 13
-delayLabel.Parent = delayRow
+local PrevCorner = Instance.new("UICorner")
+PrevCorner.CornerRadius = UDim.new(0, 4)
+PrevCorner.Parent = PreviewToggleBtn
 
-local delayInput = Instance.new("TextBox")
-delayInput.Name = "DelaySecondsInput"
-delayInput.Size = UDim2.new(0.36, 0, 0.8, 0)
-delayInput.Position = UDim2.new(0.61, 0, 0.1, 0)
-delayInput.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
-delayInput.Text = tostring(animationDelaySeconds)
-delayInput.PlaceholderText = "Sec"
-delayInput.TextColor3 = Color3.fromRGB(255, 255, 255)
-delayInput.Font = Enum.Font.SourceSansBold
-delayInput.TextSize = 13
-delayInput.Parent = delayRow
-
-local delayInputCorner = Instance.new("UICorner")
-delayInputCorner.CornerRadius = UDim.new(0, 4)
-delayInputCorner.Parent = delayInput
-
-delayInput.FocusLost:Connect(function()
-	local parsed = tonumber(delayInput.Text)
-	if parsed and parsed >= 0 then
-		animationDelaySeconds = parsed
-		delayInput.Text = tostring(animationDelaySeconds)
-		if animationModeEnabled then
-			startAnimationSequence()
-		end
+local function runUpdatePreviewCycle()
+	if not LocalPlayer.Character then return end
+	if isPreviewingMode then
+		PreviewToggleBtn.Text = "PREVIEW: ON"
+		PreviewToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 110, 60)
+		PreviewToggleBtn.TextColor3 = Color3.fromRGB(90, 255, 150)
+		lastPreset = "PREVIEW_OVERRIDE_LOCK"
+		applyPreset(LocalPlayer.Character, selectedTierName)
 	else
-		delayInput.Text = tostring(animationDelaySeconds)
+		PreviewToggleBtn.Text = "PREVIEW: OFF"
+		PreviewToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 35, 35)
+		PreviewToggleBtn.TextColor3 = Color3.fromRGB(240, 90, 90)
+		lastPreset = ""
+		forceRecalculateHealthPreset(LocalPlayer.Character)
 	end
-end)
-
--- Input Controls (Folder/Subfolder creation + Pose creation)
-local inputFrame = Instance.new("Frame")
-inputFrame.Size = UDim2.new(0.9, 0, 0, 110)
-inputFrame.Position = UDim2.new(0.05, 0, 0, 68)
-inputFrame.BackgroundTransparency = 1
-inputFrame.Parent = mainFrame
-
-local folderInput = Instance.new("TextBox")
-folderInput.Size = UDim2.new(0.70, -3, 0, 30)
-folderInput.Position = UDim2.new(0, 0, 0, 0)
-folderInput.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-folderInput.Text = ""
-folderInput.PlaceholderText = "Folder or Folder/Subfolder"
-folderInput.TextColor3 = Color3.fromRGB(255, 255, 255)
-folderInput.Font = Enum.Font.SourceSans
-folderInput.TextSize = 13
-folderInput.Parent = inputFrame
-
-local createFolderBtn = Instance.new("TextButton")
-createFolderBtn.Name = "CreateFolderBtn"
-createFolderBtn.Size = UDim2.new(0.30, -3, 0, 30)
-createFolderBtn.Position = UDim2.new(0.70, 6, 0, 0)
-createFolderBtn.BackgroundColor3 = Color3.fromRGB(185, 135, 25)
-createFolderBtn.Text = "+ Folder"
-createFolderBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-createFolderBtn.Font = Enum.Font.SourceSansBold
-createFolderBtn.TextSize = 13
-createFolderBtn.Parent = inputFrame
-
-local createFolderCorner = Instance.new("UICorner")
-createFolderCorner.CornerRadius = UDim.new(0, 5)
-createFolderCorner.Parent = createFolderBtn
-
-createFolderBtn.MouseButton1Click:Connect(function()
-	local rawFolder = folderInput.Text
-	if rawFolder:match("^%s*$") then return end
-	local createdPath = ensureFolderHierarchy(rawFolder)
-	folderInput.Text = createdPath
-	savePosesToFile()
-	if refreshList then
-		refreshList()
-	end
-end)
-
-local poseInput = Instance.new("TextBox")
-poseInput.Size = UDim2.new(1, 0, 0, 30)
-poseInput.Position = UDim2.new(0, 0, 0, 35)
-poseInput.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-poseInput.Text = ""
-poseInput.PlaceholderText = "Pose Name"
-poseInput.TextColor3 = Color3.fromRGB(255, 255, 255)
-poseInput.Font = Enum.Font.SourceSans
-poseInput.TextSize = 14
-poseInput.Parent = inputFrame
-
-local saveBtn = Instance.new("TextButton")
-saveBtn.Size = UDim2.new(1, 0, 0, 35)
-saveBtn.Position = UDim2.new(0, 0, 0, 72)
-saveBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 75)
-saveBtn.Text = "Save Current Pose"
-saveBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-saveBtn.Font = Enum.Font.SourceSansBold
-saveBtn.TextSize = 15
-saveBtn.Parent = inputFrame
-
--- Scrolling Frame (Infinite scroll without bounce-back)
-local scrollList = Instance.new("ScrollingFrame")
-scrollList.Size = UDim2.new(0.9, 0, 0, 275)
-scrollList.Position = UDim2.new(0.05, 0, 0, 188)
-scrollList.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
-scrollList.BorderSizePixel = 0
-scrollList.ScrollBarThickness = 6
-scrollList.ScrollingDirection = Enum.ScrollingDirection.Y
-scrollList.ElasticBehavior = Enum.ElasticBehavior.Never
-scrollList.Parent = mainFrame
-
-local listPadding = Instance.new("UIPadding")
-listPadding.PaddingTop = UDim.new(0, 4)
-listPadding.PaddingBottom = UDim.new(0, 8)
-listPadding.PaddingLeft = UDim.new(0, 4)
-listPadding.PaddingRight = UDim.new(0, 4)
-listPadding.Parent = scrollList
-
-local listLayout = Instance.new("UIListLayout")
-listLayout.Parent = scrollList
-listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-listLayout.Padding = UDim.new(0, 4)
-
-local extraInfiniteRunway = 1200
-
-local function updateScrollListCanvasSize(expandIfNearBottom)
-	local contentHeight = listLayout.AbsoluteContentSize.Y + listPadding.PaddingTop.Offset + listPadding.PaddingBottom.Offset + 4
-	local minHeight = math.max(contentHeight + extraInfiniteRunway, scrollList.AbsoluteSize.Y + extraInfiniteRunway)
-	local currentCanvasY = scrollList.CanvasSize.Y.Offset
-
-	if expandIfNearBottom then
-		local viewHeight = scrollList.AbsoluteSize.Y
-		local scrollY = scrollList.CanvasPosition.Y
-		if (scrollY + viewHeight) >= (currentCanvasY - 80) then
-			scrollList.CanvasSize = UDim2.new(0, 0, 0, currentCanvasY + 1200)
-			return
-		end
-	end
-
-	scrollList.CanvasSize = UDim2.new(0, 0, 0, math.max(currentCanvasY, minHeight))
 end
 
-listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-	updateScrollListCanvasSize(false)
+PreviewToggleBtn.Activated:Connect(function()
+	isPreviewingMode = not isPreviewingMode
+	runUpdatePreviewCycle()
 end)
 
-scrollList:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-	updateScrollListCanvasSize(false)
+local TierSelectionPanel = Instance.new("ScrollingFrame")
+TierSelectionPanel.Size = UDim2.new(0, 120, 1, -100)
+TierSelectionPanel.Position = UDim2.new(0, 10, 0, 40)
+TierSelectionPanel.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+TierSelectionPanel.BorderSizePixel = 0
+TierSelectionPanel.CanvasSize = UDim2.new(0, 0, 1.5, 0)
+TierSelectionPanel.ScrollBarThickness = 3
+TierSelectionPanel.Parent = MainFrame
+
+local ItemSelectionPanel = Instance.new("ScrollingFrame")
+ItemSelectionPanel.Size = UDim2.new(0, 120, 1, -100)
+ItemSelectionPanel.Position = UDim2.new(0, 135, 0, 40)
+ItemSelectionPanel.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+ItemSelectionPanel.BorderSizePixel = 0
+ItemSelectionPanel.CanvasSize = UDim2.new(0, 0, 1.5, 0)
+ItemSelectionPanel.ScrollBarThickness = 3
+ItemSelectionPanel.Parent = MainFrame
+
+local EditorScroll = Instance.new("ScrollingFrame")
+EditorScroll.Size = UDim2.new(0, 165, 1, -100)
+EditorScroll.Position = UDim2.new(0, 265, 0, 40)
+EditorScroll.BackgroundTransparency = 1
+EditorScroll.BorderSizePixel = 0
+EditorScroll.ScrollBarThickness = 3
+EditorScroll.Parent = MainFrame
+
+local EditorListLayout = Instance.new("UIListLayout")
+EditorListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+EditorListLayout.Padding = UDim.new(0, 5)
+EditorListLayout.Parent = EditorScroll
+
+EditorListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	EditorScroll.CanvasSize = UDim2.new(0, 0, 0, EditorListLayout.AbsoluteContentSize.Y + 25)
 end)
 
-scrollList:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-	updateScrollListCanvasSize(true)
+local ThresholdEditorScroll = Instance.new("ScrollingFrame")
+ThresholdEditorScroll.Name = "ThresholdEditorScroll"
+ThresholdEditorScroll.Size = UDim2.new(0, 165, 1, -100)
+ThresholdEditorScroll.Position = UDim2.new(0, 265, 0, 40)
+ThresholdEditorScroll.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+ThresholdEditorScroll.BorderSizePixel = 0
+ThresholdEditorScroll.ScrollBarThickness = 3
+ThresholdEditorScroll.Visible = false
+ThresholdEditorScroll.Parent = MainFrame
+
+local ThresholdCorner = Instance.new("UICorner")
+ThresholdCorner.CornerRadius = UDim.new(0, 6)
+ThresholdCorner.Parent = ThresholdEditorScroll
+
+local ThresholdLayout = Instance.new("UIListLayout")
+ThresholdLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ThresholdLayout.Padding = UDim.new(0, 5)
+ThresholdLayout.Parent = ThresholdEditorScroll
+
+ThresholdLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	ThresholdEditorScroll.CanvasSize = UDim2.new(0, 0, 0, ThresholdLayout.AbsoluteContentSize.Y + 20)
 end)
 
-local function updateAnimationLayout()
-	delayRow.Visible = animationModeEnabled
-	if animationModeEnabled then
-		animationBtn.BackgroundColor3 = Color3.fromRGB(125, 75, 195)
-		inputFrame.Position = UDim2.new(0.05, 0, 0, 96)
-		scrollList.Position = UDim2.new(0.05, 0, 0, 214)
-		scrollList.Size = UDim2.new(0.9, 0, 0, 249)
+local SlotFramePanel = Instance.new("ScrollingFrame")
+SlotFramePanel.Name = "SlotFramePanel"
+SlotFramePanel.Size = UDim2.new(0, 160, 0, 215)
+SlotFramePanel.Position = UDim2.new(0, 440, 0, 40)
+SlotFramePanel.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+SlotFramePanel.BorderSizePixel = 0
+SlotFramePanel.CanvasSize = UDim2.new(0, 0, 0, 300)
+SlotFramePanel.ScrollBarThickness = 2
+SlotFramePanel.Parent = MainFrame
+
+local SlotPanelCorner = Instance.new("UICorner")
+SlotPanelCorner.CornerRadius = UDim.new(0, 6)
+SlotPanelCorner.Parent = SlotFramePanel
+
+local SlotListLayout = Instance.new("UIListLayout")
+SlotListLayout.Padding = UDim.new(0, 6)
+SlotListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+SlotListLayout.Parent = SlotFramePanel
+
+local updateTierUI, updateItemUI, updateEditorUI, updateThresholdEditorUI, restoreAllTierAssets
+
+ThresholdsModeBtn.Activated:Connect(function()
+	isThresholdEditorOpen = not isThresholdEditorOpen
+	EditorScroll.Visible = not isThresholdEditorOpen
+	ThresholdEditorScroll.Visible = isThresholdEditorOpen
+
+	if isThresholdEditorOpen then
+		ThresholdsModeBtn.Text = "THRESHOLDS: ON"
+		ThresholdsModeBtn.BackgroundColor3 = Color3.fromRGB(45, 95, 150)
+		ThresholdsModeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		updateThresholdEditorUI()
 	else
-		animationBtn.BackgroundColor3 = Color3.fromRGB(75, 55, 115)
-		inputFrame.Position = UDim2.new(0.05, 0, 0, 68)
-		scrollList.Position = UDim2.new(0.05, 0, 0, 188)
-		scrollList.Size = UDim2.new(0.9, 0, 0, 275)
-	end
-	updateScrollListCanvasSize(false)
-end
-
-animationBtn.MouseButton1Click:Connect(function()
-	animationModeEnabled = not animationModeEnabled
-	updateAnimationLayout()
-	if refreshList then
-		refreshList()
-	end
-	if animationModeEnabled then
-		startAnimationSequence()
-	else
-		stopAnimationSequence(true)
+		ThresholdsModeBtn.Text = "THRESHOLDS: OFF"
+		ThresholdsModeBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 65)
+		ThresholdsModeBtn.TextColor3 = Color3.fromRGB(180, 210, 255)
 	end
 end)
 
-----------------------------------------------------
--- SETTINGS & MOVE POSE POPUP MODAL
-----------------------------------------------------
+local function drawSaveSlotsInterface()
+	for _, child in ipairs(SlotFramePanel:GetChildren()) do
+		if typeof(child) == "Instance" and (child:IsA("Frame") or child.Name == "AddSlotButton") then 
+			child:Destroy() 
+		end
+	end
+	
+	local slotCount = getSaveSlotCount()
 
-local function openPoseSettings(folderName, poseName, poseEntry)
-	local existingModal = mainFrame:FindFirstChild("SettingsModal")
-	if existingModal then existingModal:Destroy() end
-
-	local modal = Instance.new("Frame")
-	modal.Name = "SettingsModal"
-	modal.Size = UDim2.new(1, 0, 1, 0)
-	modal.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-	modal.BackgroundTransparency = 0.1
-	modal.ZIndex = 10
-	modal.Parent = mainFrame
-
-	local modalBox = Instance.new("ScrollingFrame")
-	modalBox.Size = UDim2.new(0.9, 0, 0.85, 0)
-	modalBox.Position = UDim2.new(0.05, 0, 0.08, 0)
-	modalBox.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-	modalBox.BorderSizePixel = 0
-	modalBox.ScrollBarThickness = 4
-	modalBox.ElasticBehavior = Enum.ElasticBehavior.Never
-	modalBox.ZIndex = 11
-	modalBox.Parent = modal
-
-	local mLayout = Instance.new("UIListLayout")
-	mLayout.Parent = modalBox
-	mLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	mLayout.Padding = UDim.new(0, 8)
-
-	local modalTitle = Instance.new("TextLabel")
-	modalTitle.Size = UDim2.new(1, 0, 0, 30)
-	modalTitle.BackgroundTransparency = 1
-	modalTitle.Text = "Settings: " .. poseName
-	modalTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-	modalTitle.Font = Enum.Font.SourceSansBold
-	modalTitle.TextSize = 16
-	modalTitle.ZIndex = 12
-	modalTitle.Parent = modalBox
-
-	-- Section 0: Move Pose to Folder / Subfolder
-	local moveDesc = Instance.new("TextLabel")
-	moveDesc.Size = UDim2.new(1, 0, 0, 22)
-	moveDesc.BackgroundTransparency = 1
-	moveDesc.Text = "Move Pose to Folder / Subfolder:"
-	moveDesc.TextColor3 = Color3.fromRGB(255, 215, 90)
-	moveDesc.Font = Enum.Font.SourceSansBold
-	moveDesc.TextSize = 12
-	moveDesc.TextXAlignment = Enum.TextXAlignment.Left
-	moveDesc.ZIndex = 12
-	moveDesc.Parent = modalBox
-
-	local moveRow = Instance.new("Frame")
-	moveRow.Size = UDim2.new(1, 0, 0, 28)
-	moveRow.BackgroundTransparency = 1
-	moveRow.ZIndex = 13
-	moveRow.Parent = modalBox
-
-	local moveTargetBox = Instance.new("TextBox")
-	moveTargetBox.Size = UDim2.new(0.68, 0, 1, 0)
-	moveTargetBox.Position = UDim2.new(0.02, 0, 0, 0)
-	moveTargetBox.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
-	moveTargetBox.Text = folderName
-	moveTargetBox.PlaceholderText = "Folder/Subfolder"
-	moveTargetBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-	moveTargetBox.Font = Enum.Font.SourceSans
-	moveTargetBox.TextSize = 12
-	moveTargetBox.ZIndex = 14
-	moveTargetBox.Parent = moveRow
-
-	local moveConfirmBtn = Instance.new("TextButton")
-	moveConfirmBtn.Size = UDim2.new(0.26, 0, 1, 0)
-	moveConfirmBtn.Position = UDim2.new(0.72, 0, 0, 0)
-	moveConfirmBtn.BackgroundColor3 = Color3.fromRGB(0, 135, 195)
-	moveConfirmBtn.Text = "Move"
-	moveConfirmBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	moveConfirmBtn.Font = Enum.Font.SourceSansBold
-	moveConfirmBtn.TextSize = 12
-	moveConfirmBtn.ZIndex = 14
-	moveConfirmBtn.Parent = moveRow
-
-	moveConfirmBtn.MouseButton1Click:Connect(function()
-		local destination = moveTargetBox.Text
-		if destination and destination:match("%S") then
-			if movePoseToFolder(folderName, poseName, destination) then
-				modal:Destroy()
+	for i = 1, slotCount do
+		ensureSaveSlot(i)
+		local slotKey = tostring(i)
+		local slotData = SaveSlots[slotKey] or SaveSlots[i]
+		local isEmpty = not slotData or slotData.Empty == true
+		local isActive = (activeSlotKey == slotKey)
+		local slotDisplayName = SlotNames[slotKey] or SlotNames[i] or ("SLOT " .. slotKey)
+		
+		local card = Instance.new("Frame")
+		card.Size = UDim2.new(0, 144, 0, 44)
+		card.BackgroundColor3 = isActive and Color3.fromRGB(36, 48, 44) or Color3.fromRGB(30, 30, 38)
+		card.BorderSizePixel = 0
+		card.LayoutOrder = i
+		card.Parent = SlotFramePanel
+		
+		local cardCorner = Instance.new("UICorner")
+		cardCorner.CornerRadius = UDim.new(0, 4)
+		cardCorner.Parent = card
+		
+		local statusLabel = Instance.new("TextLabel")
+		statusLabel.Size = UDim2.new(1, -30, 0, 16)
+		statusLabel.Position = UDim2.new(0, 6, 0, 2)
+		statusLabel.BackgroundTransparency = 1
+		statusLabel.Font = Enum.Font.GothamBold
+		statusLabel.Text = slotDisplayName .. (isActive and " [ACTIVE]" or (isEmpty and " [EMPTY]" or ""))
+		statusLabel.TextColor3 = isEmpty and Color3.fromRGB(130, 130, 140) or Color3.fromRGB(0, 255, 150)
+		statusLabel.TextSize = 9
+		statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+		statusLabel.Parent = card
+		
+		local renameBtn = Instance.new("TextBox")
+		renameBtn.Size = UDim2.new(0, 22, 0, 14)
+		renameBtn.Position = UDim2.new(1, -26, 0, 3)
+		renameBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+		renameBtn.Font = Enum.Font.GothamBold
+		renameBtn.Text = "✏️"
+		renameBtn.TextColor3 = Color3.fromRGB(200, 200, 205)
+		renameBtn.TextSize = 8
+		renameBtn.ClearTextOnFocus = true
+		renameBtn.Parent = card
+		
+		local rnCorner = Instance.new("UICorner")
+		rnCorner.CornerRadius = UDim.new(0, 3)
+		rnCorner.Parent = renameBtn
+		
+		renameBtn.FocusLost:Connect(function()
+			local filteredText = string.gsub(renameBtn.Text, "^%s*(.-)%s*$", "%1")
+			if filteredText ~= "" and filteredText ~= "✏️" and filteredText ~= "Invalid!" then
+				SlotNames[slotKey] = string.sub(filteredText, 1, 16)
+			else
+				SlotNames[slotKey] = "SLOT " .. slotKey
 			end
-		end
-	end)
+			saveProfileData()
+			drawSaveSlotsInterface()
+		end)
+		
+		local loadBtn = Instance.new("TextButton")
+		loadBtn.Size = UDim2.new(0, 62, 0, 18)
+		loadBtn.Position = UDim2.new(0, 6, 0, 20)
+		loadBtn.BackgroundColor3 = isEmpty and Color3.fromRGB(45, 45, 50) or Color3.fromRGB(0, 100, 180)
+		loadBtn.Font = Enum.Font.GothamBold
+		loadBtn.Text = "LOAD"
+		loadBtn.TextColor3 = isEmpty and Color3.fromRGB(160, 160, 160) or Color3.fromRGB(255, 255, 255)
+		loadBtn.TextSize = 9
+		loadBtn.Parent = card
+		
+		local lCc = Instance.new("UICorner")
+		lCc.CornerRadius = UDim.new(0, 3)
+		lCc.Parent = loadBtn
+		
+		local saveBtn = Instance.new("TextButton")
+		saveBtn.Size = UDim2.new(0, 62, 0, 18)
+		saveBtn.Position = UDim2.new(0, 76, 0, 20)
+		saveBtn.BackgroundColor3 = Color3.fromRGB(150, 90, 0)
+		saveBtn.Font = Enum.Font.GothamBold
+		saveBtn.Text = "SAVE"
+		saveBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		saveBtn.TextSize = 9
+		saveBtn.Parent = card
+		
+		local sCc = Instance.new("UICorner")
+		sCc.CornerRadius = UDim.new(0, 3)
+		sCc.Parent = saveBtn
+		
+		saveBtn.Activated:Connect(function()
+			activeSlotKey = slotKey
+			SaveSlots[slotKey] = {
+				Empty = false,
+				Offsets = cloneTable(CustomOffsets),
+				AssetIds = cloneTable(AssetIdsToLoad),
+				ExtractedNames = cloneTable(ExtractedNamesToLoad),
+				ExtractedVisuals = cloneTable(ExtractedVisuals),
+				Thresholds = cloneTable(ActiveThresholds),
+				CustomCategories = cloneTable(ActiveCustomCategories)
+			}
+			saveProfileData()
+			drawSaveSlotsInterface()
+			
+			local originalText = saveBtn.Text
+			saveBtn.Text = "SAVED!"
+			saveBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 70)
+			task.wait(0.8)
+			saveBtn.Text = originalText
+			saveBtn.BackgroundColor3 = Color3.fromRGB(150, 90, 0)
+		end)
+		
+		loadBtn.Activated:Connect(function()
+			if isEmpty or not slotData then
+				loadBtn.Text = "EMPTY!"
+				task.wait(0.8)
+				loadBtn.Text = "LOAD"
+				return
+			end
 
-	-- Quick-Pick Existing Folders & Subfolders
-	for _, existingPath in ipairs(getSortedFolderPaths()) do
-		if existingPath ~= folderName then
-			local quickFolderBtn = Instance.new("TextButton")
-			quickFolderBtn.Size = UDim2.new(0.96, 0, 0, 22)
-			quickFolderBtn.BackgroundColor3 = Color3.fromRGB(38, 42, 54)
-			quickFolderBtn.Text = "  ↳ Move to: " .. existingPath
-			quickFolderBtn.TextColor3 = Color3.fromRGB(200, 225, 255)
-			quickFolderBtn.TextXAlignment = Enum.TextXAlignment.Left
-			quickFolderBtn.Font = Enum.Font.SourceSans
-			quickFolderBtn.TextSize = 12
-			quickFolderBtn.ZIndex = 14
-			quickFolderBtn.Parent = modalBox
+			activeSlotKey = slotKey
 
-			quickFolderBtn.MouseButton1Click:Connect(function()
-				if movePoseToFolder(folderName, poseName, existingPath) then
-					modal:Destroy()
+			for _, folder in ipairs(TargetPresetFolder:GetChildren()) do
+				if typeof(folder) == "Instance" then
+					folder:ClearAllChildren()
 				end
-			end)
-		end
-	end
+			end
 
-	-- Section 1: Part Exclusions
-	local desc = Instance.new("TextLabel")
-	desc.Size = UDim2.new(1, 0, 0, 24)
-	desc.BackgroundTransparency = 1
-	desc.Text = "Part Exclusions (Allow Normal Animations):"
-	desc.TextColor3 = Color3.fromRGB(180, 180, 180)
-	desc.Font = Enum.Font.SourceSansBold
-	desc.TextSize = 12
-	desc.TextXAlignment = Enum.TextXAlignment.Left
-	desc.ZIndex = 12
-	desc.Parent = modalBox
+			CustomOffsets = cloneTable(slotData.Offsets or {})
+			AssetIdsToLoad = cloneTable(slotData.AssetIds or {})
+			ExtractedNamesToLoad = cloneTable(slotData.ExtractedNames or {})
+			ExtractedVisuals = cloneTable(slotData.ExtractedVisuals or {})
 
-	poseEntry.Exclusions = poseEntry.Exclusions or {}
+			ActiveThresholds = getDefaultThresholdsCopy()
+			if type(slotData.Thresholds) == "table" then
+				for k, v in pairs(slotData.Thresholds) do
+					local keyStr = tostring(k)
+					ActiveThresholds[keyStr] = normalizeThreshold(v, ActiveThresholds[keyStr] or 0.5)
+				end
+			end
 
-	for _, jointName in ipairs({"Neck", "Right Shoulder", "Left Shoulder", "Right Hip", "Left Hip", "RootJoint"}) do
-		local row = Instance.new("TextButton")
-		row.Size = UDim2.new(1, 0, 0, 24)
-		row.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-		row.Text = ""
-		row.ZIndex = 13
-		row.Parent = modalBox
+			ActiveCustomCategories = {}
+			if type(slotData.CustomCategories) == "table" then
+				for _, cat in ipairs(slotData.CustomCategories) do
+					if type(cat) == "table" and type(cat.Name) == "string" and cat.Name ~= "" then
+						table.insert(ActiveCustomCategories, {
+							Name = cat.Name,
+							MaxRatio = normalizeThreshold(cat.MaxRatio, 0.5)
+						})
+					end
+				end
+			end
 
-		local label = Instance.new("TextLabel")
-		label.Size = UDim2.new(0.75, 0, 1, 0)
-		label.Position = UDim2.new(0.05, 0, 0, 0)
-		label.BackgroundTransparency = 1
-		label.Text = jointName
-		label.TextColor3 = Color3.fromRGB(220, 220, 220)
-		label.TextXAlignment = Enum.TextXAlignment.Left
-		label.Font = Enum.Font.SourceSans
-		label.TextSize = 12
-		label.ZIndex = 14
-		label.Parent = row
-
-		local check = Instance.new("TextLabel")
-		check.Size = UDim2.new(0, 18, 0, 18)
-		check.Position = UDim2.new(0.85, 0, 0.12, 0)
-		check.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
-		check.Text = poseEntry.Exclusions[jointName] and "✓" or ""
-		check.TextColor3 = Color3.fromRGB(0, 255, 100)
-		check.Font = Enum.Font.SourceSansBold
-		check.TextSize = 13
-		check.ZIndex = 14
-		check.Parent = row
-
-		row.MouseButton1Click:Connect(function()
-			poseEntry.Exclusions[jointName] = not poseEntry.Exclusions[jointName]
-			check.Text = poseEntry.Exclusions[jointName] and "✓" or ""
-			savePosesToFile()
+			local validTiers = getAllTierNames()
+			local isSelectedTierValid = false
+			for _, tName in ipairs(validTiers) do
+				if tName == selectedTierName then
+					isSelectedTierValid = true
+					break
+				end
+			end
+			if not isSelectedTierValid then
+				selectedTierName = Config.SelectedDefault
+				selectedItemKey = ""
+				selectedItemDisplayName = ""
+				selectedSubPartName = "Handle"
+			end
+			
+			ensureDirectoryStructure()
+			restoreAllTierAssets()
+			drawSaveSlotsInterface()
+			
+			if isPreviewingMode then
+				runUpdatePreviewCycle()
+			elseif LocalPlayer.Character then
+				lastPreset = ""
+				forceRecalculateHealthPreset(LocalPlayer.Character)
+			end
+			
+			updateTierUI()
+			updateItemUI()
+			updateEditorUI()
+			updateThresholdEditorUI()
+			
+			loadBtn.Text = "LOADED!"
+			task.wait(0.8)
+			loadBtn.Text = "LOAD"
 		end)
 	end
 
-	-- Section 2: HP Triggers
-	local triggerDesc = Instance.new("TextLabel")
-	triggerDesc.Size = UDim2.new(1, 0, 0, 24)
-	triggerDesc.BackgroundTransparency = 1
-	triggerDesc.Text = "HP Trigger Settings:"
-	triggerDesc.TextColor3 = Color3.fromRGB(180, 180, 180)
-	triggerDesc.Font = Enum.Font.SourceSansBold
-	triggerDesc.TextSize = 12
-	triggerDesc.TextXAlignment = Enum.TextXAlignment.Left
-	triggerDesc.ZIndex = 12
-	triggerDesc.Parent = modalBox
+	local addSlotBtn = Instance.new("TextButton")
+	addSlotBtn.Name = "AddSlotButton"
+	addSlotBtn.Size = UDim2.new(0, 144, 0, 30)
+	addSlotBtn.BackgroundColor3 = Color3.fromRGB(0, 105, 75)
+	addSlotBtn.BorderSizePixel = 0
+	addSlotBtn.Font = Enum.Font.GothamBold
+	addSlotBtn.Text = "+ ADD SAVE SLOT"
+	addSlotBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	addSlotBtn.TextSize = 10
+	addSlotBtn.LayoutOrder = slotCount + 1
+	addSlotBtn.Parent = SlotFramePanel
 
-	poseEntry.Trigger = poseEntry.Trigger or { Enabled = false, MinHP = 0, MaxHP = 100 }
+	local addSlotCorner = Instance.new("UICorner")
+	addSlotCorner.CornerRadius = UDim.new(0, 4)
+	addSlotCorner.Parent = addSlotBtn
 
-	-- Enable Trigger Row
-	local trigRow = Instance.new("TextButton")
-	trigRow.Size = UDim2.new(1, 0, 0, 24)
-	trigRow.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-	trigRow.Text = ""
-	trigRow.ZIndex = 13
-	trigRow.Parent = modalBox
-
-	local trigLabel = Instance.new("TextLabel")
-	trigLabel.Size = UDim2.new(0.75, 0, 1, 0)
-	trigLabel.Position = UDim2.new(0.05, 0, 0, 0)
-	trigLabel.BackgroundTransparency = 1
-	trigLabel.Text = "Enable HP Trigger"
-	trigLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
-	trigLabel.TextXAlignment = Enum.TextXAlignment.Left
-	trigLabel.Font = Enum.Font.SourceSans
-	trigLabel.TextSize = 12
-	trigLabel.ZIndex = 14
-	trigLabel.Parent = trigRow
-
-	local trigCheck = Instance.new("TextLabel")
-	trigCheck.Size = UDim2.new(0, 18, 0, 18)
-	trigCheck.Position = UDim2.new(0.85, 0, 0.12, 0)
-	trigCheck.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
-	trigCheck.Text = poseEntry.Trigger.Enabled and "✓" or ""
-	trigCheck.TextColor3 = Color3.fromRGB(0, 255, 100)
-	trigCheck.Font = Enum.Font.SourceSansBold
-	trigCheck.TextSize = 13
-	trigCheck.ZIndex = 14
-	trigCheck.Parent = trigRow
-
-	trigRow.MouseButton1Click:Connect(function()
-		poseEntry.Trigger.Enabled = not poseEntry.Trigger.Enabled
-		trigCheck.Text = poseEntry.Trigger.Enabled and "✓" or ""
-		savePosesToFile()
+	addSlotBtn.Activated:Connect(function()
+		local newSlotNumber = getSaveSlotCount() + 1
+		ensureSaveSlot(newSlotNumber)
+		saveProfileData()
+		drawSaveSlotsInterface()
 	end)
 
-	-- Min HP Box
-	local minRow = Instance.new("Frame")
-	minRow.Size = UDim2.new(1, 0, 0, 28)
-	minRow.BackgroundTransparency = 1
-	minRow.ZIndex = 13
-	minRow.Parent = modalBox
-
-	local minLbl = Instance.new("TextLabel")
-	minLbl.Size = UDim2.new(0.6, 0, 1, 0)
-	minLbl.Position = UDim2.new(0.05, 0, 0, 0)
-	minLbl.BackgroundTransparency = 1
-	minLbl.Text = "Min HP % (Floor):"
-	minLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
-	minLbl.TextXAlignment = Enum.TextXAlignment.Left
-	minLbl.Font = Enum.Font.SourceSans
-	minLbl.TextSize = 11
-	minLbl.ZIndex = 14
-	minLbl.Parent = minRow
-
-	local minBox = Instance.new("TextBox")
-	minBox.Size = UDim2.new(0.25, 0, 0.9, 0)
-	minBox.Position = UDim2.new(0.68, 0, 0.05, 0)
-	minBox.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-	minBox.Text = tostring(poseEntry.Trigger.MinHP)
-	minBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-	minBox.Font = Enum.Font.SourceSansBold
-	minBox.TextSize = 12
-	minBox.ZIndex = 14
-	minBox.Parent = minRow
-
-	minBox.FocusLost:Connect(function()
-		local val = tonumber(minBox.Text)
-		if val then
-			poseEntry.Trigger.MinHP = math.clamp(val, 0, 100)
-			minBox.Text = tostring(poseEntry.Trigger.MinHP)
-			savePosesToFile()
-		end
-	end)
-
-	-- Max HP Box
-	local maxRow = Instance.new("Frame")
-	maxRow.Size = UDim2.new(1, 0, 0, 28)
-	maxRow.BackgroundTransparency = 1
-	maxRow.ZIndex = 13
-	maxRow.Parent = modalBox
-
-	local maxLbl = Instance.new("TextLabel")
-	maxLbl.Size = UDim2.new(0.6, 0, 1, 0)
-	maxLbl.Position = UDim2.new(0.05, 0, 0, 0)
-	maxLbl.BackgroundTransparency = 1
-	maxLbl.Text = "Max HP % (Ceiling):"
-	maxLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
-	maxLbl.TextXAlignment = Enum.TextXAlignment.Left
-	maxLbl.Font = Enum.Font.SourceSans
-	maxLbl.TextSize = 11
-	maxLbl.ZIndex = 14
-	maxLbl.Parent = maxRow
-
-	local maxBox = Instance.new("TextBox")
-	maxBox.Size = UDim2.new(0.25, 0, 0.9, 0)
-	maxBox.Position = UDim2.new(0.68, 0, 0.05, 0)
-	maxBox.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-	maxBox.Text = tostring(poseEntry.Trigger.MaxHP)
-	maxBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-	maxBox.Font = Enum.Font.SourceSansBold
-	maxBox.TextSize = 12
-	maxBox.ZIndex = 14
-	maxBox.Parent = maxRow
-
-	maxBox.FocusLost:Connect(function()
-		local val = tonumber(maxBox.Text)
-		if val then
-			poseEntry.Trigger.MaxHP = math.clamp(val, 0, 100)
-			maxBox.Text = tostring(poseEntry.Trigger.MaxHP)
-			savePosesToFile()
-		end
-	end)
-
-	-- Action Buttons Row
-	local btnRow = Instance.new("Frame")
-	btnRow.Size = UDim2.new(1, 0, 0, 36)
-	btnRow.BackgroundTransparency = 1
-	btnRow.ZIndex = 13
-	btnRow.Parent = modalBox
-
-	local deleteBtn = Instance.new("TextButton")
-	deleteBtn.Size = UDim2.new(0.45, 0, 1, 0)
-	deleteBtn.Position = UDim2.new(0.02, 0, 0, 0)
-	deleteBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-	deleteBtn.Text = "Delete Pose"
-	deleteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	deleteBtn.Font = Enum.Font.SourceSansBold
-	deleteBtn.TextSize = 12
-	deleteBtn.ZIndex = 14
-	deleteBtn.Parent = btnRow
-
-	deleteBtn.MouseButton1Click:Connect(function()
-		local identifier = folderName .. "/" .. poseName
-		if currentLoadedPoseIdentifier == identifier and LocalPlayer.Character then
-			unloadPose(LocalPlayer.Character)
-		end
-
-		if SavedFolders[folderName] then
-			SavedFolders[folderName][poseName] = nil
-			savePosesToFile()
-			modal:Destroy()
-			refreshList()
-		end
-	end)
-
-	local closeBtn = Instance.new("TextButton")
-	closeBtn.Size = UDim2.new(0.45, 0, 1, 0)
-	closeBtn.Position = UDim2.new(0.53, 0, 0, 0)
-	closeBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
-	closeBtn.Text = "Close"
-	closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	closeBtn.Font = Enum.Font.SourceSansBold
-	closeBtn.TextSize = 12
-	closeBtn.ZIndex = 14
-	closeBtn.Parent = btnRow
-
-	closeBtn.MouseButton1Click:Connect(function()
-		modal:Destroy()
-	end)
-
-	modalBox.CanvasSize = UDim2.new(0, 0, 0, mLayout.AbsoluteContentSize.Y + 20)
+	SlotFramePanel.CanvasSize = UDim2.new(0, 0, 0, (slotCount * 50) + 42)
 end
 
-----------------------------------------------------
--- UI REFRESH LOGIC
-----------------------------------------------------
-
-refreshList = function()
-	local prevCanvasPos = scrollList.CanvasPosition
-
-	for _, child in ipairs(scrollList:GetChildren()) do
-		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+updateThresholdEditorUI = function()
+	for _, child in ipairs(ThresholdEditorScroll:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UICorner") then
 			child:Destroy()
 		end
 	end
 
-	for _, folderName in ipairs(getSortedFolderPaths()) do
-		local poses = SavedFolders[folderName] or {}
-		if not isAnyAncestorCollapsed(folderName) then
-			local isCollapsed = CollapsedFolders[folderName] or false
-			local depth = getFolderDepth(folderName)
-			local indentSpaces = string.rep("   ", depth)
-			local leafLabel = getFolderDisplayName(folderName)
+	local orderCounter = 1
+	local function nextOrder()
+		local o = orderCounter
+		orderCounter = orderCounter + 1
+		return o
+	end
 
-			local folderHeaderRow = Instance.new("Frame")
-			folderHeaderRow.Size = UDim2.new(1, -8, 0, 25)
-			folderHeaderRow.BackgroundColor3 = depth > 0 and Color3.fromRGB(38, 42, 54) or Color3.fromRGB(45, 45, 55)
-			folderHeaderRow.Parent = scrollList
+	local slotScopeLabel = Instance.new("TextLabel")
+	slotScopeLabel.Size = UDim2.new(1, -8, 0, 20)
+	slotScopeLabel.BackgroundTransparency = 1
+	slotScopeLabel.Font = Enum.Font.GothamBold
+	slotScopeLabel.Text = activeSlotKey and ("SLOT " .. activeSlotKey .. " (0-1 or 'nil')") or "THRESHOLDS (0-1 or 'nil')"
+	slotScopeLabel.TextColor3 = Color3.fromRGB(0, 255, 150)
+	slotScopeLabel.TextSize = 9
+	slotScopeLabel.TextXAlignment = Enum.TextXAlignment.Left
+	slotScopeLabel.LayoutOrder = nextOrder()
+	slotScopeLabel.Parent = ThresholdEditorScroll
 
-			local folderHeader = Instance.new("TextButton")
-			folderHeader.Size = UDim2.new(folderName ~= "Default" and 0.72 or 1, 0, 1, 0)
-			folderHeader.BackgroundTransparency = 1
-			folderHeader.Text = indentSpaces .. (isCollapsed and " ▶ 📁 " or " ▼ 📁 ") .. leafLabel
-			folderHeader.TextColor3 = depth > 0 and Color3.fromRGB(160, 220, 255) or Color3.fromRGB(255, 215, 0)
-			folderHeader.TextXAlignment = Enum.TextXAlignment.Left
-			folderHeader.Font = Enum.Font.SourceSansBold
-			folderHeader.TextSize = 13
-			folderHeader.TextTruncate = Enum.TextTruncate.AtEnd
-			folderHeader.Parent = folderHeaderRow
+	local defaultDamageTiers = {
+		Config.SelectedMinor,
+		Config.SelectedMedium,
+		Config.SelectedMajor,
+		Config.SelectedCritical
+	}
 
-			folderHeader.MouseButton1Click:Connect(function()
-				CollapsedFolders[folderName] = not isCollapsed
-				refreshList()
-			end)
+	for _, tierName in ipairs(defaultDamageTiers) do
+		ensureSubFolder(tierName)
+		local currentVal = ActiveThresholds[tierName]
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(1, -8, 0, 22)
+		row.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
+		row.BorderSizePixel = 0
+		row.LayoutOrder = nextOrder()
+		row.Parent = ThresholdEditorScroll
 
-			local addSubBtn = Instance.new("TextButton")
-			addSubBtn.Size = UDim2.new(0.15, 0, 0.8, 0)
-			addSubBtn.Position = UDim2.new(folderName ~= "Default" and 0.73 or 0.83, 0, 0.1, 0)
-			addSubBtn.BackgroundColor3 = Color3.fromRGB(65, 95, 130)
-			addSubBtn.Text = "+Sub"
-			addSubBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			addSubBtn.Font = Enum.Font.SourceSansBold
-			addSubBtn.TextSize = 11
-			addSubBtn.Parent = folderHeaderRow
+		local rCorner = Instance.new("UICorner")
+		rCorner.CornerRadius = UDim.new(0, 4)
+		rCorner.Parent = row
 
-			local subCorner = Instance.new("UICorner")
-			subCorner.CornerRadius = UDim.new(0, 4)
-			subCorner.Parent = addSubBtn
+		local lbl = Instance.new("TextLabel")
+		lbl.Size = UDim2.new(0.62, -4, 1, 0)
+		lbl.Position = UDim2.new(0, 4, 0, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.Font = Enum.Font.GothamSemibold
+		lbl.Text = tierName
+		lbl.TextColor3 = isNilThreshold(currentVal) and Color3.fromRGB(135, 135, 150) or Color3.fromRGB(220, 220, 230)
+		lbl.TextSize = 9
+		lbl.TextTruncate = Enum.TextTruncate.AtEnd
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.Parent = row
 
-			addSubBtn.MouseButton1Click:Connect(function()
-				folderInput.Text = folderName .. "/"
-				folderInput:CaptureFocus()
-			end)
+		local box = Instance.new("TextBox")
+		box.Size = UDim2.new(0.36, 0, 0, 18)
+		box.Position = UDim2.new(0.62, 0, 0, 2)
+		box.BackgroundColor3 = Color3.fromRGB(40, 40, 52)
+		box.BorderSizePixel = 0
+		box.Font = Enum.Font.GothamBold
+		box.Text = formatThresholdText(currentVal)
+		box.TextColor3 = isNilThreshold(currentVal) and Color3.fromRGB(255, 130, 130) or Color3.fromRGB(255, 220, 120)
+		box.TextSize = 9
+		box.ClearTextOnFocus = false
+		box.Parent = row
 
-			if folderName ~= "Default" then
-				local delFolderBtn = Instance.new("TextButton")
-				delFolderBtn.Size = UDim2.new(0.10, 0, 0.8, 0)
-				delFolderBtn.Position = UDim2.new(0.89, 0, 0.1, 0)
-				delFolderBtn.BackgroundColor3 = Color3.fromRGB(165, 45, 45)
-				delFolderBtn.Text = "X"
-				delFolderBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-				delFolderBtn.Font = Enum.Font.SourceSansBold
-				delFolderBtn.TextSize = 11
-				delFolderBtn.Parent = folderHeaderRow
+		local bCorner = Instance.new("UICorner")
+		bCorner.CornerRadius = UDim.new(0, 3)
+		bCorner.Parent = box
 
-				local delFCorner = Instance.new("UICorner")
-				delFCorner.CornerRadius = UDim.new(0, 4)
-				delFCorner.Parent = delFolderBtn
-
-				delFolderBtn.MouseButton1Click:Connect(function()
-					deleteFolderAndSubfolders(folderName)
-					savePosesToFile()
-					refreshList()
-				end)
+		box.FocusLost:Connect(function()
+			local raw = box.Text
+			if isNilThreshold(raw) then
+				ActiveThresholds[tierName] = "nil"
+				box.Text = "nil"
+				box.TextColor3 = Color3.fromRGB(255, 130, 130)
+				lbl.TextColor3 = Color3.fromRGB(135, 135, 150)
+				saveProfileData()
+				if not isPreviewingMode and LocalPlayer.Character then
+					lastPreset = ""
+					forceRecalculateHealthPreset(LocalPlayer.Character)
+				end
+				return
 			end
 
-			if not isCollapsed then
-				local sortedPoseNames = {}
-				for pName in pairs(poses) do
-					table.insert(sortedPoseNames, pName)
+			local parsed = tonumber(raw)
+			if parsed then
+				local clamped = normalizeThreshold(parsed, ActiveThresholds[tierName] or 0.5)
+				ActiveThresholds[tierName] = clamped
+				box.Text = formatThresholdText(clamped)
+				box.TextColor3 = Color3.fromRGB(255, 220, 120)
+				lbl.TextColor3 = Color3.fromRGB(220, 220, 230)
+				saveProfileData()
+				if not isPreviewingMode and LocalPlayer.Character then
+					lastPreset = ""
+					forceRecalculateHealthPreset(LocalPlayer.Character)
 				end
-				table.sort(sortedPoseNames, function(a, b)
-					return a:lower() < b:lower()
-				end)
+			else
+				box.Text = formatThresholdText(ActiveThresholds[tierName])
+			end
+		end)
+	end
 
-				for _, poseName in ipairs(sortedPoseNames) do
-					local poseEntry = poses[poseName]
-					local poseIdentifier = folderName .. "/" .. poseName
-					local isCurrentlyLoaded = (currentLoadedPoseIdentifier == poseIdentifier)
-					local objCount = poseEntry.IncludedObjects and #poseEntry.IncludedObjects or 0
+	local customHeader = Instance.new("TextLabel")
+	customHeader.Size = UDim2.new(1, -8, 0, 18)
+	customHeader.BackgroundTransparency = 1
+	customHeader.Font = Enum.Font.GothamBold
+	customHeader.Text = "SLOT CUSTOM CATEGORIES"
+	customHeader.TextColor3 = Color3.fromRGB(130, 200, 255)
+	customHeader.TextSize = 9
+	customHeader.TextXAlignment = Enum.TextXAlignment.Left
+	customHeader.LayoutOrder = nextOrder()
+	customHeader.Parent = ThresholdEditorScroll
 
-					local poseItem = Instance.new("Frame")
-					poseItem.Size = UDim2.new(1, -8, 0, 30)
-					poseItem.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
-					poseItem.Parent = scrollList
+	local newNameBox = Instance.new("TextBox")
+	newNameBox.Size = UDim2.new(1, -8, 0, 20)
+	newNameBox.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+	newNameBox.BorderSizePixel = 0
+	newNameBox.Font = Enum.Font.Gotham
+	newNameBox.PlaceholderText = "New category name..."
+	newNameBox.Text = ""
+	newNameBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+	newNameBox.TextSize = 9
+	newNameBox.ClearTextOnFocus = true
+	newNameBox.LayoutOrder = nextOrder()
+	newNameBox.Parent = ThresholdEditorScroll
 
-					local nameWidth = animationModeEnabled and 0.29 or 0.40
-					local loadX = animationModeEnabled and 0.30 or 0.41
-					local loadW = animationModeEnabled and 0.18 or 0.20
-					local orderX = 0.49
-					local orderW = 0.11
-					local settingsX = animationModeEnabled and 0.61 or 0.62
-					local settingsW = animationModeEnabled and 0.15 or 0.17
-					local exportX = animationModeEnabled and 0.77 or 0.80
-					local exportW = animationModeEnabled and 0.21 or 0.18
+	local nnCorner = Instance.new("UICorner")
+	nnCorner.CornerRadius = UDim.new(0, 3)
+	nnCorner.Parent = newNameBox
 
-					local poseNameLabel = Instance.new("TextLabel")
-					poseNameLabel.Size = UDim2.new(nameWidth, 0, 1, 0)
-					poseNameLabel.BackgroundTransparency = 1
-					poseNameLabel.Text = indentSpaces .. "   " .. poseName .. (objCount > 0 and (" [" .. objCount .. " acc]") or "")
-					poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
-					poseNameLabel.TextXAlignment = Enum.TextXAlignment.Left
-					poseNameLabel.Font = Enum.Font.SourceSans
-					poseNameLabel.TextSize = 13
-					poseNameLabel.TextTruncate = Enum.TextTruncate.AtEnd
-					poseNameLabel.Parent = poseItem
+	local newThreshBox = Instance.new("TextBox")
+	newThreshBox.Size = UDim2.new(1, -8, 0, 20)
+	newThreshBox.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+	newThreshBox.BorderSizePixel = 0
+	newThreshBox.Font = Enum.Font.Gotham
+	newThreshBox.PlaceholderText = "Threshold (0-1 or 'nil')"
+	newThreshBox.Text = "0.40"
+	newThreshBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+	newThreshBox.TextSize = 9
+	newThreshBox.ClearTextOnFocus = false
+	newThreshBox.LayoutOrder = nextOrder()
+	newThreshBox.Parent = ThresholdEditorScroll
 
-					local loadBtn = Instance.new("TextButton")
-					loadBtn.Size = UDim2.new(loadW, 0, 0.8, 0)
-					loadBtn.Position = UDim2.new(loadX, 0, 0.1, 0)
-					loadBtn.BackgroundColor3 = isCurrentlyLoaded and Color3.fromRGB(180, 50, 50) or Color3.fromRGB(0, 120, 215)
-					loadBtn.Text = isCurrentlyLoaded and "Unload" or "Load"
-					loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-					loadBtn.Font = Enum.Font.SourceSansBold
-					loadBtn.TextSize = 12
-					loadBtn.Parent = poseItem
+	local ntCorner = Instance.new("UICorner")
+	ntCorner.CornerRadius = UDim.new(0, 3)
+	ntCorner.Parent = newThreshBox
 
-					local btnCorner1 = Instance.new("UICorner")
-					btnCorner1.CornerRadius = UDim.new(0, 4)
-					btnCorner1.Parent = loadBtn
+	local addCatBtn = Instance.new("TextButton")
+	addCatBtn.Size = UDim2.new(1, -8, 0, 22)
+	addCatBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 85)
+	addCatBtn.BorderSizePixel = 0
+	addCatBtn.Font = Enum.Font.GothamBold
+	addCatBtn.Text = "+ ADD SLOT CATEGORY"
+	addCatBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	addCatBtn.TextSize = 9
+	addCatBtn.LayoutOrder = nextOrder()
+	addCatBtn.Parent = ThresholdEditorScroll
 
-					loadBtn.MouseButton1Click:Connect(function()
-						if LocalPlayer.Character then
-							applyPoseData(LocalPlayer.Character, poseEntry, poseIdentifier)
-							refreshList()
+	local acCorner = Instance.new("UICorner")
+	acCorner.CornerRadius = UDim.new(0, 3)
+	acCorner.Parent = addCatBtn
+
+	addCatBtn.Activated:Connect(function()
+		local cleanName = string.gsub(newNameBox.Text or "", "^%s*(.-)%s*$", "%1")
+		if cleanName == "" then
+			newNameBox.Text = ""
+			newNameBox.PlaceholderText = "Enter name first!"
+			return
+		end
+
+		local rawThresh = newThreshBox.Text
+		local finalThresh
+		if isNilThreshold(rawThresh) then
+			finalThresh = "nil"
+		else
+			local parsedThresh = tonumber(rawThresh)
+			if not parsedThresh then
+				newThreshBox.Text = "0.40"
+				return
+			end
+			finalThresh = normalizeThreshold(parsedThresh, 0.40)
+		end
+
+		local exists = false
+		for _, cat in ipairs(ActiveCustomCategories) do
+			if string.lower(cat.Name) == string.lower(cleanName) then
+				cat.MaxRatio = finalThresh
+				exists = true
+				break
+			end
+		end
+
+		if not exists then
+			table.insert(ActiveCustomCategories, {
+				Name = cleanName,
+				MaxRatio = finalThresh
+			})
+		end
+
+		ensureSubFolder(cleanName)
+		selectedTierName = cleanName
+		selectedItemKey = ""
+		selectedItemDisplayName = ""
+		selectedSubPartName = "Handle"
+
+		saveProfileData()
+		drawSaveSlotsInterface()
+		updateTierUI()
+		updateItemUI()
+		updateEditorUI()
+		updateThresholdEditorUI()
+
+		if not isPreviewingMode and LocalPlayer.Character then
+			lastPreset = ""
+			forceRecalculateHealthPreset(LocalPlayer.Character)
+		end
+	end)
+
+	for idx, cat in ipairs(ActiveCustomCategories) do
+		local isCatNil = isNilThreshold(cat.MaxRatio)
+		local cRow = Instance.new("Frame")
+		cRow.Size = UDim2.new(1, -8, 0, 22)
+		cRow.BackgroundColor3 = Color3.fromRGB(28, 34, 44)
+		cRow.BorderSizePixel = 0
+		cRow.LayoutOrder = nextOrder()
+		cRow.Parent = ThresholdEditorScroll
+
+		local crCorner = Instance.new("UICorner")
+		crCorner.CornerRadius = UDim.new(0, 4)
+		crCorner.Parent = cRow
+
+		local cName = Instance.new("TextLabel")
+		cName.Size = UDim2.new(0.52, -2, 1, 0)
+		cName.Position = UDim2.new(0, 4, 0, 0)
+		cName.BackgroundTransparency = 1
+		cName.Font = Enum.Font.GothamSemibold
+		cName.Text = cat.Name
+		cName.TextColor3 = isCatNil and Color3.fromRGB(130, 150, 170) or Color3.fromRGB(160, 220, 255)
+		cName.TextSize = 9
+		cName.TextTruncate = Enum.TextTruncate.AtEnd
+		cName.TextXAlignment = Enum.TextXAlignment.Left
+		cName.Parent = cRow
+
+		local cBox = Instance.new("TextBox")
+		cBox.Size = UDim2.new(0.28, 0, 0, 18)
+		cBox.Position = UDim2.new(0.53, 0, 0, 2)
+		cBox.BackgroundColor3 = Color3.fromRGB(40, 45, 58)
+		cBox.BorderSizePixel = 0
+		cBox.Font = Enum.Font.GothamBold
+		cBox.Text = formatThresholdText(cat.MaxRatio)
+		cBox.TextColor3 = isCatNil and Color3.fromRGB(255, 130, 130) or Color3.fromRGB(255, 255, 255)
+		cBox.TextSize = 9
+		cBox.ClearTextOnFocus = false
+		cBox.Parent = cRow
+
+		local cbCorner = Instance.new("UICorner")
+		cbCorner.CornerRadius = UDim.new(0, 3)
+		cbCorner.Parent = cBox
+
+		cBox.FocusLost:Connect(function()
+			if not ActiveCustomCategories[idx] then return end
+			local raw = cBox.Text
+			if isNilThreshold(raw) then
+				ActiveCustomCategories[idx].MaxRatio = "nil"
+				cBox.Text = "nil"
+				cBox.TextColor3 = Color3.fromRGB(255, 130, 130)
+				cName.TextColor3 = Color3.fromRGB(130, 150, 170)
+				saveProfileData()
+				if not isPreviewingMode and LocalPlayer.Character then
+					lastPreset = ""
+					forceRecalculateHealthPreset(LocalPlayer.Character)
+				end
+				return
+			end
+
+			local parsed = tonumber(raw)
+			if parsed then
+				local clamped = normalizeThreshold(parsed, ActiveCustomCategories[idx].MaxRatio or 0.5)
+				ActiveCustomCategories[idx].MaxRatio = clamped
+				cBox.Text = formatThresholdText(clamped)
+				cBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+				cName.TextColor3 = Color3.fromRGB(160, 220, 255)
+				saveProfileData()
+				if not isPreviewingMode and LocalPlayer.Character then
+					lastPreset = ""
+					forceRecalculateHealthPreset(LocalPlayer.Character)
+				end
+			else
+				cBox.Text = formatThresholdText(ActiveCustomCategories[idx].MaxRatio)
+			end
+		end)
+
+		local delBtn = Instance.new("TextButton")
+		delBtn.Size = UDim2.new(0.16, 0, 0, 18)
+		delBtn.Position = UDim2.new(0.82, 0, 0, 2)
+		delBtn.BackgroundColor3 = Color3.fromRGB(150, 45, 45)
+		delBtn.BorderSizePixel = 0
+		delBtn.Font = Enum.Font.GothamBold
+		delBtn.Text = "X"
+		delBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		delBtn.TextSize = 9
+		delBtn.Parent = cRow
+
+		local dbCorner = Instance.new("UICorner")
+		dbCorner.CornerRadius = UDim.new(0, 3)
+		dbCorner.Parent = delBtn
+
+		delBtn.Activated:Connect(function()
+			local removed = ActiveCustomCategories[idx]
+			table.remove(ActiveCustomCategories, idx)
+
+			if removed and removed.Name then
+				local folder = TargetPresetFolder:FindFirstChild(removed.Name)
+				if folder then folder:Destroy() end
+				CustomOffsets[removed.Name] = nil
+				AssetIdsToLoad[removed.Name] = nil
+				ExtractedNamesToLoad[removed.Name] = nil
+				ExtractedVisuals[removed.Name] = nil
+
+				if selectedTierName == removed.Name then
+					selectedTierName = Config.SelectedDefault
+					selectedItemKey = ""
+					selectedItemDisplayName = ""
+					selectedSubPartName = "Handle"
+				end
+			end
+
+			saveProfileData()
+			drawSaveSlotsInterface()
+			updateTierUI()
+			updateItemUI()
+			updateEditorUI()
+			updateThresholdEditorUI()
+
+			if not isPreviewingMode and LocalPlayer.Character then
+				lastPreset = ""
+				forceRecalculateHealthPreset(LocalPlayer.Character)
+			end
+		end)
+	end
+end
+
+local InjectorFrame = Instance.new("Frame")
+InjectorFrame.Size = UDim2.new(1, -20, 0, 45)
+InjectorFrame.Position = UDim2.new(0, 10, 1, -55)
+InjectorFrame.BackgroundColor3 = Color3.fromRGB(32, 32, 40)
+InjectorFrame.BorderSizePixel = 0
+InjectorFrame.Parent = MainFrame
+
+local InjectorCorner = Instance.new("UICorner")
+InjectorCorner.CornerRadius = UDim.new(0, 6)
+InjectorCorner.Parent = InjectorFrame
+
+local IdTextBox = Instance.new("TextBox")
+IdTextBox.Size = UDim2.new(0, 380, 0, 30)
+IdTextBox.Position = UDim2.new(0, 10, 0, 7)
+IdTextBox.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+IdTextBox.BorderSizePixel = 0
+IdTextBox.Font = Enum.Font.Gotham
+IdTextBox.PlaceholderText = "Enter Asset ID..."
+IdTextBox.Text = ""
+IdTextBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+IdTextBox.TextSize = 11
+IdTextBox.ClearTextOnFocus = true
+IdTextBox.Parent = InjectorFrame
+
+local IdCorner = Instance.new("UICorner")
+IdCorner.CornerRadius = UDim.new(0, 4)
+IdCorner.Parent = IdTextBox
+
+local InjectBtn = Instance.new("TextButton")
+InjectBtn.Size = UDim2.new(1, -405, 0, 30)
+InjectBtn.Position = UDim2.new(0, 400, 0, 7)
+InjectBtn.BackgroundColor3 = Color3.fromRGB(0, 130, 70)
+InjectBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+InjectBtn.Text = "DOWNLOAD ID"
+InjectBtn.Font = Enum.Font.GothamBold
+InjectBtn.TextSize = 10
+InjectBtn.Parent = InjectorFrame
+
+local InjectBtnCorner = Instance.new("UICorner")
+InjectBtnCorner.CornerRadius = UDim.new(0, 4)
+InjectBtnCorner.Parent = InjectBtn
+
+injectAssetId = function(id, tierName, isSilentRestore, explicitKey)
+	if id == nil then return false end
+	local strId = tostring(id)
+	if strId == "" then return false end
+	
+	tierName = tostring(tierName or Config.SelectedDefault)
+	ensureSubFolder(tierName)
+	local targetFolder = TargetPresetFolder:FindFirstChild(tierName)
+	if not targetFolder then return false end
+
+	local success, assetModel = pcall(function()
+		return game:GetObjects("rbxassetid://" .. strId)[1]
+	end)
+	
+	if (not success or typeof(assetModel) ~= "Instance") and type(ExtractedVisuals[tierName]) == "table" then
+		for entryKey, parts in pairs(ExtractedVisuals[tierName]) do
+			if type(parts) == "table" and (not explicitKey or entryKey == explicitKey) then
+				local match = false
+				for partName, visualData in pairs(parts) do
+					if type(visualData) == "table" then
+						local meshStr = visualData.MeshId and tostring(visualData.MeshId) or ""
+						if meshStr ~= "" and type(meshStr) == "string" and type(strId) == "string" then
+							if string.find(meshStr, strId, 1, true) then
+								match = true
+								break
+							end
 						end
-					end)
+					end
+				end
+				
+				if match then
+					local cleanName = string.match(entryKey, "^(.-)__inst_%d+_%d+$") or entryKey
+					assetModel = generateExtractedPlaceholderModel(tierName, cleanName, entryKey)
+					if typeof(assetModel) == "Instance" then
+						success = true
+						break
+					end
+				end
+			end
+		end
+	end
+	
+	if success and typeof(assetModel) == "Instance" then
+		if type(assetModel.Name) == "string" and not string.find(assetModel.Name, "Asset_") and not assetModel:IsA("Accessory") then
+			assetModel.Name = "Asset_" .. strId
+		end
+		
+		local itemKey = initializeItemData(tierName, assetModel, explicitKey)
+		assetModel.Parent = targetFolder
+		
+		if not isSilentRestore then
+			if not AssetIdsToLoad[tierName] or type(AssetIdsToLoad[tierName]) ~= "table" then
+				AssetIdsToLoad[tierName] = {}
+			end
+			table.insert(AssetIdsToLoad[tierName], {
+				Id = tonumber(strId) or strId,
+				Key = itemKey,
+				Name = assetModel.Name
+			})
 
-					if animationModeEnabled then
-						local orderBox = Instance.new("TextBox")
-						orderBox.Name = "AnimOrderBox"
-						orderBox.Size = UDim2.new(orderW, 0, 0.8, 0)
-						orderBox.Position = UDim2.new(orderX, 0, 0.1, 0)
-						orderBox.BackgroundColor3 = Color3.fromRGB(50, 45, 70)
-						orderBox.Text = poseEntry.AnimOrder and tostring(poseEntry.AnimOrder) or ""
-						orderBox.PlaceholderText = "#"
-						orderBox.TextColor3 = Color3.fromRGB(255, 240, 150)
-						orderBox.Font = Enum.Font.SourceSansBold
-						orderBox.TextSize = 12
-						orderBox.Parent = poseItem
+			selectedItemKey = itemKey or ""
+			selectedItemDisplayName = assetModel.Name
+			selectedSubPartName = "Handle"
+			
+			if isPreviewingMode then
+				runUpdatePreviewCycle()
+			elseif LocalPlayer.Character then
+				applyPreset(LocalPlayer.Character, lastPreset)
+			end
+			
+			updateItemUI()
+			updateEditorUI()
+			saveProfileData()
+		end
 
-						local orderCorner = Instance.new("UICorner")
-						orderCorner.CornerRadius = UDim.new(0, 4)
-						orderCorner.Parent = orderBox
+		return true
+	end
+	
+	return false
+end
 
-						orderBox.FocusLost:Connect(function()
-							local trimmed = string.gsub(orderBox.Text or "", "^%s*(.-)%s*$", "%1")
-							local num = tonumber(trimmed)
-							if num and num >= 1 then
-								poseEntry.AnimOrder = math.floor(num)
-								orderBox.Text = tostring(poseEntry.AnimOrder)
-							else
-								poseEntry.AnimOrder = nil
-								orderBox.Text = ""
-							end
-							savePosesToFile()
-							if animationModeEnabled then
-								startAnimationSequence()
-							end
+InjectBtn.Activated:Connect(function()
+	local id = tonumber(IdTextBox.Text)
+	if not id then
+		IdTextBox.Text = "Invalid ID!"
+		task.wait(1)
+		IdTextBox.Text = ""
+		return
+	end
+	
+	InjectBtn.Text = "DOWNLOADING..."
+	InjectBtn.BackgroundColor3 = Color3.fromRGB(130, 90, 0)
+	
+	task.spawn(function()
+		local ok = injectAssetId(id, selectedTierName, false)
+		IdTextBox.Text = ok and "Success!" or "Load Fail!"
+		task.wait(1.2)
+		InjectBtn.Text = "DOWNLOAD ID"
+		InjectBtn.BackgroundColor3 = Color3.fromRGB(0, 130, 70)
+		IdTextBox.Text = ""
+	end)
+end)
+
+local compSelectBtn = Instance.new("TextButton")
+compSelectBtn.Size = UDim2.new(1, 0, 0, 26)
+compSelectBtn.BackgroundColor3 = Color3.fromRGB(45, 55, 45)
+compSelectBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+compSelectBtn.Text = "Part: Handle"
+compSelectBtn.Font = Enum.Font.GothamBold
+compSelectBtn.TextSize = 11
+compSelectBtn.LayoutOrder = 1
+compSelectBtn.Parent = EditorScroll
+
+local dropDownWrapper = Instance.new("Frame")
+dropDownWrapper.Size = UDim2.new(1, 0, 0, 100)
+dropDownWrapper.BackgroundTransparency = 1
+dropDownWrapper.Visible = false
+dropDownWrapper.LayoutOrder = 2
+dropDownWrapper.Parent = EditorScroll
+
+local compDropdownScroll = Instance.new("ScrollingFrame")
+compDropdownScroll.Size = UDim2.new(1, 0, 1, 0)
+compDropdownScroll.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+compDropdownScroll.BorderSizePixel = 0
+compDropdownScroll.ScrollBarThickness = 3
+compDropdownScroll.Parent = dropDownWrapper
+
+compSelectBtn.Activated:Connect(function() dropDownWrapper.Visible = not dropDownWrapper.Visible end)
+
+local inputs = {}
+local transformRows = {}
+local effectRows = {}
+
+local function createEditorInput(labelText, property, orderingIndex, modeType)
+	local container = Instance.new("Frame")
+	container.Size = UDim2.new(1, 0, 0, 24)
+	container.BackgroundTransparency = 1
+	container.LayoutOrder = orderingIndex
+	container.Visible = (modeType == "transform")
+	container.Parent = EditorScroll
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(0, 78, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.GothamSemibold
+	label.Text = labelText
+	label.TextColor3 = Color3.fromRGB(170, 170, 180)
+	label.TextSize = 10
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = container
+
+	local textBox = Instance.new("TextBox")
+	textBox.Size = UDim2.new(1, -82, 1, 0)
+	textBox.Position = UDim2.new(0, 82, 0, 0)
+	textBox.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+	textBox.BorderSizePixel = 0
+	textBox.Font = Enum.Font.Gotham
+	textBox.Text = (property == "transparency") and "0.00" or "0"
+	textBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+	textBox.TextSize = 11
+	textBox.ClearTextOnFocus = false
+	
+	local boxCorner = Instance.new("UICorner")
+	boxCorner.CornerRadius = UDim.new(0, 4)
+	boxCorner.Parent = textBox
+
+	textBox.Parent = container
+
+	textBox.FocusLost:Connect(function()
+		if selectedItemKey == "" then return end
+		local tierData = CustomOffsets[selectedTierName]
+		if tierData and tierData[selectedItemKey] and tierData[selectedItemKey][selectedSubPartName] then
+			local pData = tierData[selectedItemKey][selectedSubPartName]
+			local val = tonumber(textBox.Text)
+			if val then
+				if isQualityVisualPart(selectedSubPartName) and (property == "scaleX" or property == "scaleY" or property == "scaleZ" or property == "transparency") then
+					if property == "transparency" then
+						pData.transparency = 0
+						textBox.Text = "0.00"
+					else
+						pData[property] = 0
+						textBox.Text = "0"
+					end
+				elseif property == "transparency" then
+					local clampedAlpha = normalizeTransparency(val, pData.transparency or 0)
+					pData.transparency = clampedAlpha
+					textBox.Text = string.format("%.2f", clampedAlpha)
+				elseif property == "colorR" or property == "colorG" or property == "colorB" then
+					local clampedChannel = normalizeColorChannel(val, pData[property] or 1)
+					pData[property] = clampedChannel
+					textBox.Text = tostring(math.floor(clampedChannel * 255 + 0.5))
+				else
+					pData[property] = val
+				end
+
+				if isPreviewingMode then
+					runUpdatePreviewCycle()
+				elseif LocalPlayer.Character then
+					applyPreset(LocalPlayer.Character, lastPreset)
+				end
+				saveProfileData()
+			else
+				if property == "transparency" then
+					textBox.Text = string.format("%.2f", normalizeTransparency(pData.transparency, 0))
+				elseif property == "colorR" or property == "colorG" or property == "colorB" then
+					textBox.Text = tostring(math.floor(normalizeColorChannel(pData[property], 1) * 255 + 0.5))
+				end
+			end
+		end
+	end)
+
+	inputs[property] = textBox
+	if modeType == "effect" then
+		table.insert(effectRows, container)
+	else
+		table.insert(transformRows, container)
+	end
+end
+
+createEditorInput("Offset X:", "offsetX", 10, "transform")
+createEditorInput("Offset Y:", "offsetY", 11, "transform")
+createEditorInput("Offset Z:", "offsetZ", 12, "transform")
+createEditorInput("Rotate X:", "rotateX", 13, "transform")
+createEditorInput("Rotate Y:", "rotateY", 14, "transform")
+createEditorInput("Rotate Z:", "rotateZ", 15, "transform")
+createEditorInput("Scale X:",  "scaleX",  16, "transform")
+createEditorInput("Scale Y:",  "scaleY",  17, "transform")
+createEditorInput("Scale Z:",  "scaleZ",  18, "transform")
+
+createEditorInput("Red (0-255):",   "colorR",       20, "effect")
+createEditorInput("Green (0-255):", "colorG",       21, "effect")
+createEditorInput("Blue (0-255):",  "colorB",       22, "effect")
+createEditorInput("Transparency:",  "transparency", 23, "effect")
+
+local ExtractBtn = Instance.new("TextButton")
+ExtractBtn.Size = UDim2.new(1, 0, 0, 26)
+ExtractBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 150)
+ExtractBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ExtractBtn.Text = "EXTRACT ACCESSORIES"
+ExtractBtn.Font = Enum.Font.GothamBold
+ExtractBtn.TextSize = 10
+ExtractBtn.LayoutOrder = 50 
+ExtractBtn.Parent = EditorScroll
+
+local ExtractBtnCorner = Instance.new("UICorner")
+ExtractBtnCorner.CornerRadius = UDim.new(0, 4)
+ExtractBtnCorner.Parent = ExtractBtn
+
+local DeleteItemBtn = Instance.new("TextButton")
+DeleteItemBtn.Size = UDim2.new(1, 0, 0, 26)
+DeleteItemBtn.BackgroundColor3 = Color3.fromRGB(150, 40, 40)
+DeleteItemBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+DeleteItemBtn.Text = "DELETE ITEM"
+DeleteItemBtn.Font = Enum.Font.GothamBold
+DeleteItemBtn.TextSize = 10
+DeleteItemBtn.LayoutOrder = 51
+DeleteItemBtn.Parent = EditorScroll
+
+local DeleteBtnCorner = Instance.new("UICorner")
+DeleteBtnCorner.CornerRadius = UDim.new(0, 4)
+DeleteBtnCorner.Parent = DeleteItemBtn
+
+local EffectsTabBtn = Instance.new("TextButton")
+EffectsTabBtn.Name = "EffectsTabButton"
+EffectsTabBtn.Size = UDim2.new(1, 0, 0, 26)
+EffectsTabBtn.BackgroundColor3 = Color3.fromRGB(65, 45, 95)
+EffectsTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+EffectsTabBtn.Text = "Effects"
+EffectsTabBtn.Font = Enum.Font.GothamBold
+EffectsTabBtn.TextSize = 10
+EffectsTabBtn.LayoutOrder = 52
+EffectsTabBtn.Parent = EditorScroll
+
+local EffectsTabCorner = Instance.new("UICorner")
+EffectsTabCorner.CornerRadius = UDim.new(0, 4)
+EffectsTabCorner.Parent = EffectsTabBtn
+
+local function refreshEditorTabVisibility()
+	for _, row in ipairs(transformRows) do
+		row.Visible = not isEffectsTabOpen
+	end
+	for _, row in ipairs(effectRows) do
+		row.Visible = isEffectsTabOpen
+	end
+	if isEffectsTabOpen then
+		EffectsTabBtn.Text = "Effects (ON)"
+		EffectsTabBtn.BackgroundColor3 = Color3.fromRGB(115, 65, 165)
+	else
+		EffectsTabBtn.Text = "Effects"
+		EffectsTabBtn.BackgroundColor3 = Color3.fromRGB(65, 45, 95)
+	end
+end
+
+EffectsTabBtn.Activated:Connect(function()
+	isEffectsTabOpen = not isEffectsTabOpen
+	refreshEditorTabVisibility()
+	updateEditorUI()
+end)
+
+DeleteItemBtn.Activated:Connect(function()
+	if selectedItemKey == "" then return end
+	local targetFolder = TargetPresetFolder:FindFirstChild(selectedTierName)
+	if targetFolder then
+		for _, child in ipairs(targetFolder:GetChildren()) do
+			if getItemKey(child) == selectedItemKey then
+				child:Destroy()
+				break
+			end
+		end
+	end
+	
+	if CustomOffsets[selectedTierName] then CustomOffsets[selectedTierName][selectedItemKey] = nil end
+	if ExtractedVisuals[selectedTierName] then ExtractedVisuals[selectedTierName][selectedItemKey] = nil end
+	
+	if type(ExtractedNamesToLoad[selectedTierName]) == "table" then
+		for idx = #ExtractedNamesToLoad[selectedTierName], 1, -1 do
+			local entry = ExtractedNamesToLoad[selectedTierName][idx]
+			if type(entry) == "table" and entry.Key == selectedItemKey then
+				table.remove(ExtractedNamesToLoad[selectedTierName], idx)
+				break
+			elseif entry == selectedItemKey then
+				table.remove(ExtractedNamesToLoad[selectedTierName], idx)
+				break
+			end
+		end
+	end
+	
+	if type(AssetIdsToLoad[selectedTierName]) == "table" then
+		for idx = #AssetIdsToLoad[selectedTierName], 1, -1 do
+			local entry = AssetIdsToLoad[selectedTierName][idx]
+			if type(entry) == "table" and entry.Key == selectedItemKey then
+				table.remove(AssetIdsToLoad[selectedTierName], idx)
+				break
+			end
+		end
+	end
+	
+	selectedItemKey = ""
+	selectedItemDisplayName = ""
+	selectedSubPartName = "Handle"
+	clearActiveHighlight()
+	saveProfileData()
+	
+	updateItemUI()
+	updateEditorUI()
+	
+	if isPreviewingMode then
+		runUpdatePreviewCycle()
+	elseif LocalPlayer.Character then
+		applyPreset(LocalPlayer.Character, lastPreset)
+	end
+end)
+
+ExtractBtn.Activated:Connect(function()
+	local char = LocalPlayer.Character
+	if not char then return end
+	local head = char:FindFirstChild("Head")
+	if not head then return end
+	ensureSubFolder(selectedTierName)
+	local targetFolder = TargetPresetFolder:FindFirstChild(selectedTierName)
+	if not targetFolder then return end
+
+	local extractedCount = 0
+	ExtractBtn.Text = "EXTRACTING..."
+	ExtractBtn.BackgroundColor3 = Color3.fromRGB(130, 90, 0)
+	
+	for _, child in ipairs(char:GetChildren()) do
+		if child:IsA("Accessory") and not safeTableFind(activeClientInstances, child) then
+			local handle = child:FindFirstChild("Handle") or child:FindFirstChildWhichIsA("BasePart", true)
+
+			if handle and handle:IsA("BasePart") then
+				local assetId = 0
+				local mesh = handle:FindFirstChildWhichIsA("SpecialMesh")
+				if mesh and mesh.MeshId ~= "" then
+					local rawId = string.match(mesh.MeshId, "%d+")
+					if rawId then assetId = tonumber(rawId) end
+				end
+
+				local internalName = child.Name
+				local entryKey = generateUniqueItemKey(internalName)
+				local cloneCopy = child:Clone()
+				cloneCopy.Name = internalName
+				setItemKey(cloneCopy, entryKey)
+				
+				for _, subItem in ipairs(cloneCopy:GetDescendants()) do
+					if subItem:IsA("Weld") or subItem:IsA("ManualWeld") or subItem:IsA("WeldConstraint") or subItem:IsA("Attachment") or subItem:IsA("RigidConstraint") then
+						subItem:Destroy()
+					end
+				end
+
+				cloneCopy.Parent = targetFolder
+				
+				if not ExtractedVisuals[selectedTierName] then ExtractedVisuals[selectedTierName] = {} end
+				ExtractedVisuals[selectedTierName][entryKey] = {}
+				
+				for _, part in ipairs(cloneCopy:GetDescendants()) do
+					if part:IsA("BasePart") then
+						local isQV = isQualityVisualPart(part.Name)
+						local pMesh = part:FindFirstChildWhichIsA("SpecialMesh")
+						local meshId = pMesh and pMesh.MeshId or (part:IsA("MeshPart") and part.MeshId or "")
+						local textureId = pMesh and pMesh.TextureId or (part:IsA("MeshPart") and part.TextureID or "")
+						
+						ExtractedVisuals[selectedTierName][entryKey][part.Name] = {
+							MeshId = meshId,
+							TextureId = textureId,
+							SizeX = isQV and 0 or part.Size.X,
+							SizeY = isQV and 0 or part.Size.Y,
+							SizeZ = isQV and 0 or part.Size.Z,
+							ColorR = part.Color.R,
+							ColorG = part.Color.G,
+							ColorB = part.Color.B,
+							Material = tostring(part.Material),
+							Transparency = isQV and 0 or part.Transparency,
+							Reflectance = part.Reflectance
+						}
+					end
+				end
+				
+				if assetId > 0 then
+					if not AssetIdsToLoad[selectedTierName] or type(AssetIdsToLoad[selectedTierName]) ~= "table" then
+						AssetIdsToLoad[selectedTierName] = {}
+					end
+					table.insert(AssetIdsToLoad[selectedTierName], {
+						Id = assetId,
+						Key = entryKey,
+						Name = internalName
+					})
+				else
+					if not ExtractedNamesToLoad[selectedTierName] or type(ExtractedNamesToLoad[selectedTierName]) ~= "table" then
+						ExtractedNamesToLoad[selectedTierName] = {}
+					end
+					table.insert(ExtractedNamesToLoad[selectedTierName], {
+						Key = entryKey,
+						Name = internalName
+					})
+				end
+				
+				initializeItemData(selectedTierName, cloneCopy, entryKey)
+				
+				local relativeCFrame = head.CFrame:ToObjectSpace(handle.CFrame)
+				local offsetX, offsetY, offsetZ = relativeCFrame.X, relativeCFrame.Y, relativeCFrame.Z
+				local rX, rY, rZ = relativeCFrame:ToEulerAnglesXYZ()
+				local rotX, rotY, rotZ = math.deg(rX), math.deg(rY), math.deg(rZ)
+				
+				local scaleX, scaleY, scaleZ = 1, 1, 1
+				if mesh then
+					scaleX, scaleY, scaleZ = mesh.Scale.X, mesh.Scale.Y, mesh.Scale.Z
+				else
+					scaleX, scaleY, scaleZ = handle.Size.X, handle.Size.Y, handle.Size.Z
+				end
+
+				local hR, hG, hB = getPartInitialColor(handle)
+				
+				if CustomOffsets[selectedTierName] and CustomOffsets[selectedTierName][entryKey] then
+					CustomOffsets[selectedTierName][entryKey]["Handle"] = {
+						offsetX = offsetX, offsetY = offsetY, offsetZ = offsetZ,
+						rotateX = rotX, rotateY = rotY, rotateZ = rotZ,
+						scaleX = scaleX, scaleY = scaleY, scaleZ = scaleZ,
+						colorR = hR, colorG = hG, colorB = hB,
+						transparency = normalizeTransparency(handle.Transparency, 0)
+					}
+				end
+
+				selectedItemKey = entryKey
+				selectedItemDisplayName = internalName
+				extractedCount = extractedCount + 1
+			end
+		end
+	end
+	
+	saveProfileData()
+	updateItemUI()
+	updateEditorUI()
+	
+	if isPreviewingMode then
+		runUpdatePreviewCycle()
+	elseif LocalPlayer.Character then
+		applyPreset(LocalPlayer.Character, lastPreset)
+	end
+	
+	ExtractBtn.Text = "EXTRACTED (" .. tostring(extractedCount) .. ")"
+	ExtractBtn.BackgroundColor3 = Color3.fromRGB(0, 130, 70)
+	task.wait(1.2)
+	ExtractBtn.Text = "EXTRACT ACCESSORIES"
+	ExtractBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 150)
+end)
+
+updateEditorUI = function()
+	refreshEditorTabVisibility()
+	if selectedItemKey == "" then
+		compSelectBtn.Text = "No Item Selected"
+		for _, box in pairs(inputs) do box.Text = "" end
+		return
+	end
+	
+	compSelectBtn.Text = "Part: " .. selectedSubPartName
+	compDropdownScroll:ClearAllChildren()
+	
+	local dropLayout = Instance.new("UIListLayout")
+	dropLayout.Parent = compDropdownScroll
+	
+	local itemProfile = CustomOffsets[selectedTierName] and CustomOffsets[selectedTierName][selectedItemKey]
+	if not itemProfile then return end
+	
+	local sorted = {}
+	for n, _ in pairs(itemProfile) do table.insert(sorted, n) end
+
+	table.sort(sorted, function(a, b)
+		if a == "Handle" then return true
+		elseif b == "Handle" then return false
+		else return a < b end
+	end)
+	
+	for _, pName in ipairs(sorted) do
+		local rBtn = Instance.new("TextButton")
+		rBtn.Size = UDim2.new(1, 0, 0, 22)
+		rBtn.BackgroundColor3 = (pName == selectedSubPartName) and Color3.fromRGB(0, 120, 60) or Color3.fromRGB(30, 30, 35)
+		rBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		rBtn.Text = pName
+		rBtn.Font = Enum.Font.Gotham
+		rBtn.TextSize = 10
+		rBtn.Parent = compDropdownScroll
+		
+		rBtn.Activated:Connect(function()
+			selectedSubPartName = pName
+			dropDownWrapper.Visible = false
+			updateEditorUI()
+			highlightSelectedSubPart()
+		end)
+	end
+
+	compDropdownScroll.CanvasSize = UDim2.new(0, 0, 0, #sorted * 22)
+	
+	local pData = itemProfile[selectedSubPartName]
+	if pData then
+		local isQV = isQualityVisualPart(selectedSubPartName)
+		inputs["offsetX"].Text = tostring(pData.offsetX or 0)
+		inputs["offsetY"].Text = tostring(pData.offsetY or 0)
+		inputs["offsetZ"].Text = tostring(pData.offsetZ or 0)
+		inputs["rotateX"].Text = tostring(pData.rotateX or 0)
+		inputs["rotateY"].Text = tostring(pData.rotateY or 0)
+		inputs["rotateZ"].Text = tostring(pData.rotateZ or 0)
+		inputs["scaleX"].Text  = isQV and "0" or tostring(pData.scaleX or 1)
+		inputs["scaleY"].Text  = isQV and "0" or tostring(pData.scaleY or 1)
+		inputs["scaleZ"].Text  = isQV and "0" or tostring(pData.scaleZ or 1)
+		inputs["colorR"].Text  = tostring(math.floor(normalizeColorChannel(pData.colorR, 1) * 255 + 0.5))
+		inputs["colorG"].Text  = tostring(math.floor(normalizeColorChannel(pData.colorG, 1) * 255 + 0.5))
+		inputs["colorB"].Text  = tostring(math.floor(normalizeColorChannel(pData.colorB, 1) * 255 + 0.5))
+		inputs["transparency"].Text = isQV and "0.00" or string.format("%.2f", normalizeTransparency(pData.transparency, 0))
+	end
+end
+
+updateItemUI = function()
+	ItemSelectionPanel:ClearAllChildren()
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.Padding = UDim.new(0, 4)
+	listLayout.Parent = ItemSelectionPanel
+	
+	local targetFolder = TargetPresetFolder:FindFirstChild(selectedTierName)
+	if not targetFolder then return end
+	
+	local children = targetFolder:GetChildren()
+	if #children == 0 then
+		selectedItemKey = ""
+		selectedItemDisplayName = ""
+		updateEditorUI()
+		return
+	end
+
+	local nameCounts = {}
+	for _, child in ipairs(children) do
+		if typeof(child) == "Instance" then
+			nameCounts[child.Name] = (nameCounts[child.Name] or 0) + 1
+		end
+	end
+
+	local seenIndexByName = {}
+	local hasSelectedInFolder = false
+
+	for _, child in ipairs(children) do
+		if typeof(child) == "Instance" then
+			local itemKey = initializeItemData(selectedTierName, child, getItemKey(child))
+			if itemKey == selectedItemKey then
+				hasSelectedInFolder = true
+			end
+
+			seenIndexByName[child.Name] = (seenIndexByName[child.Name] or 0) + 1
+			local buttonLabel = child.Name
+			if (nameCounts[child.Name] or 0) > 1 then
+				buttonLabel = string.format("%s (#%d)", child.Name, seenIndexByName[child.Name])
+			end
+
+			local iBtn = Instance.new("TextButton")
+			iBtn.Size = UDim2.new(1, 0, 0, 26)
+			iBtn.BackgroundColor3 = (itemKey == selectedItemKey) and Color3.fromRGB(0, 90, 160) or Color3.fromRGB(35, 35, 40)
+			iBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			iBtn.Text = buttonLabel
+			iBtn.Font = Enum.Font.GothamSemibold
+			iBtn.TextSize = 10
+			iBtn.Parent = ItemSelectionPanel
+			
+			iBtn.Activated:Connect(function()
+				selectedItemKey = itemKey or ""
+				selectedItemDisplayName = child.Name
+				selectedSubPartName = "Handle"
+				updateItemUI()
+				updateEditorUI()
+				highlightSelectedSubPart()
+			end)
+		end
+	end
+
+	if not hasSelectedInFolder then
+		selectedItemKey = ""
+		selectedItemDisplayName = ""
+		updateEditorUI()
+	end
+
+	ItemSelectionPanel.CanvasSize = UDim2.new(0, 0, 0, #children * 30)
+end
+
+updateTierUI = function()
+	TierSelectionPanel:ClearAllChildren()
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.Padding = UDim.new(0, 4)
+	listLayout.Parent = TierSelectionPanel
+	
+	local tiers = getAllTierNames()
+
+	for _, tName in ipairs(tiers) do
+		ensureSubFolder(tName)
+		local isCustom = false
+		for _, cat in ipairs(ActiveCustomCategories) do
+			if cat.Name == tName then
+				isCustom = true
+				break
+			end
+		end
+
+		local tBtn = Instance.new("TextButton")
+		tBtn.Size = UDim2.new(1, 0, 0, 26)
+		tBtn.BackgroundColor3 = (tName == selectedTierName) and Color3.fromRGB(120, 80, 0) or (isCustom and Color3.fromRGB(32, 46, 62) or Color3.fromRGB(35, 35, 40))
+		tBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		tBtn.Text = isCustom and (tName .. " *") or tName
+		tBtn.Font = Enum.Font.GothamBold
+		tBtn.TextSize = 10
+		tBtn.Parent = TierSelectionPanel
+		
+		tBtn.Activated:Connect(function()
+			selectedTierName = tName
+			selectedItemKey = ""
+			selectedItemDisplayName = ""
+			selectedSubPartName = "Handle"
+
+			updateTierUI()
+			updateItemUI()
+			updateEditorUI()
+			clearActiveHighlight()
+			
+			if isPreviewingMode then runUpdatePreviewCycle() end
+		end)
+	end
+
+	TierSelectionPanel.CanvasSize = UDim2.new(0, 0, 0, #tiers * 30)
+end
+
+restoreAllTierAssets = function()
+	if type(AssetIdsToLoad) == "table" then
+		for tierName, idList in pairs(AssetIdsToLoad) do
+			if type(idList) == "table" then
+				for _, entry in ipairs(idList) do
+					if type(entry) == "table" and entry.Id ~= nil then
+						local validId = entry.Id
+						local validTier = tierName
+						local validKey = entry.Key
+						task.spawn(function()
+							injectAssetId(validId, validTier, true, validKey)
+						end)
+					elseif entry ~= nil then
+						local validId = entry
+						local validTier = tierName
+						task.spawn(function()
+							injectAssetId(validId, validTier, true)
 						end)
 					end
-
-					local settingsBtn = Instance.new("TextButton")
-					settingsBtn.Size = UDim2.new(settingsW, 0, 0.8, 0)
-					settingsBtn.Position = UDim2.new(settingsX, 0, 0.1, 0)
-					settingsBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 95)
-					settingsBtn.Text = "⚙️"
-					settingsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-					settingsBtn.Font = Enum.Font.SourceSansBold
-					settingsBtn.TextSize = 12
-					settingsBtn.Parent = poseItem
-
-					local btnCorner2 = Instance.new("UICorner")
-					btnCorner2.CornerRadius = UDim.new(0, 4)
-					btnCorner2.Parent = settingsBtn
-
-					settingsBtn.MouseButton1Click:Connect(function()
-						openPoseSettings(folderName, poseName, poseEntry)
-					end)
-
-					local exportBtn = Instance.new("TextButton")
-					exportBtn.Size = UDim2.new(exportW, 0, 0.8, 0)
-					exportBtn.Position = UDim2.new(exportX, 0, 0.1, 0)
-					exportBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 110)
-					exportBtn.Text = "Export"
-					exportBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-					exportBtn.Font = Enum.Font.SourceSansBold
-					exportBtn.TextSize = 11
-					exportBtn.Parent = poseItem
-
-					local btnCorner3 = Instance.new("UICorner")
-					btnCorner3.CornerRadius = UDim.new(0, 4)
-					btnCorner3.Parent = exportBtn
-
-					exportBtn.MouseButton1Click:Connect(function()
-						local exportString = "\n--- EXPORTED POSE [" .. folderName .. "/" .. poseName .. "] ---\n"
-						exportString = exportString .. "local " .. poseName .. " = {\n"
-						for joint, cf in pairs(poseEntry.Joints) do
-							local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
-							exportString = exportString .. string.format('    ["%s"] = CFrame.new(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f),\n', joint, x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22)
-						end
-						exportString = exportString .. "}\n--------------------------"
-						
-						print(exportString)
-						pcall(function()
-							setclipboard(exportString)
-						end)
-					end)
+				end
+			end
+		end
+	end
+	
+	if type(ExtractedNamesToLoad) == "table" then
+		for tierName, extractionList in pairs(ExtractedNamesToLoad) do
+			if type(extractionList) == "table" then
+				for _, entry in ipairs(extractionList) do
+					if type(entry) == "table" and type(entry.Name) == "string" and entry.Name ~= "" then
+						generateExtractedPlaceholderModel(tierName, entry.Name, entry.Key)
+					elseif type(entry) == "string" and entry ~= "" then
+						generateExtractedPlaceholderModel(tierName, entry)
+					end
 				end
 			end
 		end
 	end
 
-	updateScrollListCanvasSize(false)
-	scrollList.CanvasPosition = Vector2.new(0, math.max(0, prevCanvasPos.Y))
+	task.wait(0.2)
+	updateItemUI()
+	updateEditorUI()
 end
 
-----------------------------------------------------
--- BUTTON HANDLERS
-----------------------------------------------------
+updateTierUI()
+updateItemUI()
+updateEditorUI()
+updateThresholdEditorUI()
+drawSaveSlotsInterface()
+restoreAllTierAssets()
 
-toggleBtn.MouseButton1Click:Connect(function()
-	mainFrame.Visible = not mainFrame.Visible
+if LocalPlayer.Character then task.spawn(monitorHealth, LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(monitorHealth)
+
+Players.PlayerRemoving:Connect(function(player)
+	if player == LocalPlayer then saveProfileData() end
 end)
-
-saveBtn.MouseButton1Click:Connect(function()
-	local folderInputText = ensureFolderHierarchy(folderInput.Text)
-	local poseInputText = poseInput.Text ~= "" and poseInput.Text or ("Pose_" .. tostring(tick()):sub(5, 8))
-
-	local char = LocalPlayer.Character
-	if not char then return end
-
-	local poseData = extractPoseData(char)
-	if poseData then
-		SavedFolders[folderInputText][poseInputText] = poseData
-
-		poseInput.Text = ""
-		savePosesToFile()
-		refreshList()
-	end
-end)
-
--- Load existing saved poses on startup and start with all folders closed
-loadPosesFromFile()
-collapseAllFolders()
-updateAnimationLayout()
-refreshList()
-print("xdm3wedidit9ak")
+print("2993xperhapsx")
