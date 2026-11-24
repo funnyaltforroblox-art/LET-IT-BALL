@@ -19,6 +19,7 @@ local R6_LIMB_MAP = {
 -- Workspace Save Configuration
 local FOLDER_NAME = "R6PoseManager"
 local FILE_NAME = FOLDER_NAME .. "/SavedPoses.json"
+local QUALITY_VISUAL_PART_NAME = "R6QualityVisual"
 
 -- Pose Database, Object Toggle, Animation State & Folder State
 local SavedFolders = {
@@ -151,6 +152,10 @@ end
 -- TEXTURE, SIZE & FORM HELPERS
 ----------------------------------------------------
 
+local function isQualityVisualPart(partName)
+	return tostring(partName or "") == QUALITY_VISUAL_PART_NAME
+end
+
 local function normalizeAssetId(val)
 	if not val then return "" end
 	local str = tostring(val)
@@ -210,18 +215,19 @@ local function serializeIncludedObjects(objectsList)
 	for index, entry in ipairs(objectsList) do
 		local partsSerialized = {}
 		for partKey, pInfo in pairs(entry.Parts or {}) do
+			local isQV = isQualityVisualPart(pInfo.Name or partKey)
 			partsSerialized[partKey] = {
 				Key = pInfo.Key or partKey,
 				Name = pInfo.Name or partKey,
 				IsHandle = pInfo.IsHandle or false,
 				RootRelCFrame = serializeCFrame(pInfo.RootRelCFrame or CFrame.identity),
-				Size = {pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1},
-				MeshScale = pInfo.HasMeshScale and {pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1} or nil,
+				Size = isQV and {0, 0, 0} or {pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1},
+				MeshScale = isQV and {0, 0, 0} or (pInfo.HasMeshScale and {pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1} or nil),
 				MeshId = pInfo.MeshId or "",
 				TextureId = pInfo.TextureId or "",
 				Color = {pInfo.ColorR or 1, pInfo.ColorG or 1, pInfo.ColorB or 1},
 				Material = pInfo.Material or "Plastic",
-				Transparency = pInfo.Transparency or 0,
+				Transparency = isQV and 0 or (pInfo.Transparency or 0),
 				Reflectance = pInfo.Reflectance or 0,
 				DecalTextures = pInfo.DecalTextures or {}
 			}
@@ -243,28 +249,30 @@ local function deserializeIncludedObjects(rawList)
 			local partsDeserialized = {}
 			for partKey, pInfo in pairs(entry.Parts or {}) do
 				if type(pInfo) == "table" then
+					local partName = pInfo.Name or partKey
+					local isQV = isQualityVisualPart(partName)
 					local sz = pInfo.Size or {1, 1, 1}
 					local ms = pInfo.MeshScale
 					local col = pInfo.Color or {1, 1, 1}
 					partsDeserialized[partKey] = {
 						Key = pInfo.Key or partKey,
-						Name = pInfo.Name or partKey,
+						Name = partName,
 						IsHandle = pInfo.IsHandle or false,
 						RootRelCFrame = deserializeCFrame(pInfo.RootRelCFrame),
-						SizeX = sz[1] or 1,
-						SizeY = sz[2] or 1,
-						SizeZ = sz[3] or 1,
-						HasMeshScale = type(ms) == "table",
-						MeshScaleX = type(ms) == "table" and (ms[1] or 1) or 1,
-						MeshScaleY = type(ms) == "table" and (ms[2] or 1) or 1,
-						MeshScaleZ = type(ms) == "table" and (ms[3] or 1) or 1,
+						SizeX = isQV and 0 or (sz[1] or 1),
+						SizeY = isQV and 0 or (sz[2] or 1),
+						SizeZ = isQV and 0 or (sz[3] or 1),
+						HasMeshScale = isQV or (type(ms) == "table"),
+						MeshScaleX = isQV and 0 or (type(ms) == "table" and (ms[1] or 1) or 1),
+						MeshScaleY = isQV and 0 or (type(ms) == "table" and (ms[2] or 1) or 1),
+						MeshScaleZ = isQV and 0 or (type(ms) == "table" and (ms[3] or 1) or 1),
 						MeshId = pInfo.MeshId or "",
 						TextureId = pInfo.TextureId or "",
 						ColorR = col[1] or 1,
 						ColorG = col[2] or 1,
 						ColorB = col[3] or 1,
 						Material = pInfo.Material or "Plastic",
-						Transparency = pInfo.Transparency or 0,
+						Transparency = isQV and 0 or (pInfo.Transparency or 0),
 						Reflectance = pInfo.Reflectance or 0,
 						DecalTextures = type(pInfo.DecalTextures) == "table" and pInfo.DecalTextures or {}
 					}
@@ -386,6 +394,7 @@ local function scanAttachedPlayerAccessories(character)
 					idx = idx + 1
 					partCounter = partCounter + 1
 					local partKey = string.format("%s__p%d_%d", desc.Name ~= "" and desc.Name or "Part", partCounter, idx)
+					local isQV = isQualityVisualPart(desc.Name)
 
 					local specialMesh = desc:FindFirstChildWhichIsA("SpecialMesh")
 					local meshId = ""
@@ -407,6 +416,11 @@ local function scanAttachedPlayerAccessories(character)
 						textureId = normalizeAssetId(desc.TextureID)
 					end
 
+					if isQV then
+						hasMeshScale = true
+						meshScaleX, meshScaleY, meshScaleZ = 0, 0, 0
+					end
+
 					local decalTextures = {}
 					for _, sub in ipairs(desc:GetChildren()) do
 						if sub:IsA("Decal") or sub:IsA("Texture") then
@@ -415,7 +429,7 @@ local function scanAttachedPlayerAccessories(character)
 								Name = sub.Name,
 								Texture = normalizeAssetId(sub.Texture),
 								Face = tostring(sub.Face),
-								Transparency = sub.Transparency
+								Transparency = isQV and 0 or sub.Transparency
 							})
 						end
 					end
@@ -428,9 +442,9 @@ local function scanAttachedPlayerAccessories(character)
 						Name = desc.Name,
 						IsHandle = (handle ~= nil and desc == handle),
 						RootRelCFrame = anchorCF:ToObjectSpace(desc.CFrame),
-						SizeX = desc.Size.X,
-						SizeY = desc.Size.Y,
-						SizeZ = desc.Size.Z,
+						SizeX = isQV and 0 or desc.Size.X,
+						SizeY = isQV and 0 or desc.Size.Y,
+						SizeZ = isQV and 0 or desc.Size.Z,
 						HasMeshScale = hasMeshScale,
 						MeshScaleX = meshScaleX,
 						MeshScaleY = meshScaleY,
@@ -441,7 +455,7 @@ local function scanAttachedPlayerAccessories(character)
 						ColorG = cG,
 						ColorB = cB,
 						Material = matStr,
-						Transparency = desc.Transparency,
+						Transparency = isQV and 0 or desc.Transparency,
 						Reflectance = desc.Reflectance,
 						DecalTextures = decalTextures
 					}
@@ -477,13 +491,17 @@ local function clearSpawnedPoseObjects()
 end
 
 local function applyStaticPartForm(part, pInfo, anchorCF)
-	local partSize = Vector3.new(pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1)
+	local isQV = isQualityVisualPart(pInfo.Name or part.Name)
+	local partSize = isQV and Vector3.new(0, 0, 0) or Vector3.new(pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1)
 	part.Size = partSize
 	part.CFrame = anchorCF * (pInfo.RootRelCFrame or CFrame.identity)
+	if isQV then
+		part.Transparency = 0
+	end
 
 	local specialMesh = part:FindFirstChildWhichIsA("SpecialMesh")
-	if specialMesh and pInfo.HasMeshScale then
-		specialMesh.Scale = Vector3.new(pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1)
+	if specialMesh and (isQV or pInfo.HasMeshScale) then
+		specialMesh.Scale = isQV and Vector3.new(0, 0, 0) or Vector3.new(pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1)
 	end
 end
 
@@ -500,12 +518,13 @@ local function spawnIncludedObjects(character, includedObjects)
 		container.Name = string.format("StaticAcc_%s_%d", tostring(objEntry.Name or "Accessory"), idx)
 
 		for _, pInfo in pairs(objEntry.Parts or {}) do
+			local isQV = isQualityVisualPart(pInfo.Name)
 			local part = Instance.new("Part")
 			part.Name = pInfo.Name or "Part"
 			part.Anchored = true
 			part.CanCollide = false
 			part.Massless = true
-			part.Transparency = pInfo.Transparency or 0
+			part.Transparency = isQV and 0 or (pInfo.Transparency or 0)
 			part.Reflectance = pInfo.Reflectance or 0
 
 			local matEnum = Enum.Material[tostring(pInfo.Material or "Plastic")]
@@ -515,12 +534,14 @@ local function spawnIncludedObjects(character, includedObjects)
 			local meshId = normalizeAssetId(pInfo.MeshId)
 			local textureId = normalizeAssetId(pInfo.TextureId)
 
-			if meshId ~= "" or textureId ~= "" or pInfo.HasMeshScale then
+			if meshId ~= "" or textureId ~= "" or pInfo.HasMeshScale or isQV then
 				local sm = Instance.new("SpecialMesh")
 				sm.MeshType = meshId ~= "" and Enum.MeshType.FileMesh or Enum.MeshType.Brick
 				if meshId ~= "" then sm.MeshId = meshId end
 				if textureId ~= "" then sm.TextureId = textureId end
-				if pInfo.HasMeshScale then
+				if isQV then
+					sm.Scale = Vector3.new(0, 0, 0)
+				elseif pInfo.HasMeshScale then
 					sm.Scale = Vector3.new(pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1)
 				end
 				sm.Parent = part
@@ -531,7 +552,7 @@ local function spawnIncludedObjects(character, includedObjects)
 				local dec = Instance.new(decClass)
 				dec.Name = decInfo.Name or decClass
 				dec.Texture = normalizeAssetId(decInfo.Texture)
-				dec.Transparency = decInfo.Transparency or 0
+				dec.Transparency = isQV and 0 or (decInfo.Transparency or 0)
 				local faceEnum = Enum.NormalId[tostring(decInfo.Face or "Front")]
 				if faceEnum then dec.Face = faceEnum end
 				dec.Parent = part
@@ -1848,4 +1869,4 @@ loadPosesFromFile()
 collapseAllFolders()
 updateAnimationLayout()
 refreshList()
-print("xdm3wedidit9ak")
+print("xdm3wedyesak")
