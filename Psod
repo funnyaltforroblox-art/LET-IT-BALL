@@ -19,7 +19,6 @@ local R6_LIMB_MAP = {
 -- Workspace Save Configuration
 local FOLDER_NAME = "R6PoseManager"
 local FILE_NAME = FOLDER_NAME .. "/SavedPoses.json"
-local OBJECT_SCAN_RADIUS = 50
 
 -- Pose Database, Object Toggle & Folder State
 local SavedFolders = {
@@ -35,7 +34,7 @@ local currentLoadedPoseIdentifier = nil
 local currentLoadedPoseEntry = nil
 
 ----------------------------------------------------
--- TEXTURE, SIZE & POSITION HELPERS (FROM ACESS2)
+-- TEXTURE, SIZE & FORM HELPERS (FROM ACESS2)
 ----------------------------------------------------
 
 local function normalizeAssetId(val)
@@ -72,19 +71,10 @@ local function applyPartColorRGB(part, r, g, b)
 	end
 end
 
-local function isPlayerCharacterDescendant(instance)
-	for _, plr in ipairs(Players:GetPlayers()) do
-		if plr.Character and (instance == plr.Character or instance:IsDescendantOf(plr.Character)) then
-			return true
-		end
-	end
-	return false
-end
-
-local function getPositionAnchorPart(character)
+local function getStaticAnchorPart(character)
 	if not character then return nil end
-	-- Prefer HumanoidRootPart position (never Torso, which rotates in poses)
-	return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head") or character:FindFirstChild("Torso")
+	-- Use HumanoidRootPart (or Head fallback) so Torso pose rotations do not distort static accessory form
+	return character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
 end
 
 ----------------------------------------------------
@@ -101,28 +91,16 @@ local function deserializeCFrame(tbl)
 	return CFrame.new(unpack(tbl))
 end
 
-local function serializeVector3(v)
-	v = v or Vector3.zero
-	return {v.X, v.Y, v.Z}
-end
-
-local function deserializeVector3(tbl, fallback)
-	if type(tbl) ~= "table" then return fallback or Vector3.zero end
-	return Vector3.new(tbl[1] or 0, tbl[2] or 0, tbl[3] or 0)
-end
-
 local function serializeIncludedObjects(objectsList)
 	local out = {}
 	if type(objectsList) ~= "table" then return out end
 	for _, entry in ipairs(objectsList) do
 		local partsSerialized = {}
 		for partName, pInfo in pairs(entry.Parts or {}) do
-			local relOffset = pInfo.RelOffset or ((pInfo.WorldCFrame and pInfo.AnchorWorldPos) and (pInfo.WorldCFrame.Position - pInfo.AnchorWorldPos) or Vector3.zero)
 			partsSerialized[partName] = {
 				Name = pInfo.Name or partName,
 				IsHandle = pInfo.IsHandle or false,
-				RelOffset = serializeVector3(relOffset),
-				WorldCFrame = serializeCFrame(pInfo.WorldCFrame or CFrame.identity),
+				RootRelCFrame = serializeCFrame(pInfo.RootRelCFrame or CFrame.identity),
 				Size = {pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1},
 				MeshScale = pInfo.HasMeshScale and {pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1} or nil,
 				MeshId = pInfo.MeshId or "",
@@ -136,7 +114,6 @@ local function serializeIncludedObjects(objectsList)
 		end
 		table.insert(out, {
 			Name = entry.Name or "Accessory",
-			Distance = entry.Distance or 0,
 			Parts = partsSerialized
 		})
 	end
@@ -154,13 +131,10 @@ local function deserializeIncludedObjects(rawList)
 					local sz = pInfo.Size or {1, 1, 1}
 					local ms = pInfo.MeshScale
 					local col = pInfo.Color or {1, 1, 1}
-					local worldCF = deserializeCFrame(pInfo.WorldCFrame)
-					local relOffset = deserializeVector3(pInfo.RelOffset, worldCF.Position)
 					partsDeserialized[partName] = {
 						Name = pInfo.Name or partName,
 						IsHandle = pInfo.IsHandle or false,
-						RelOffset = relOffset,
-						WorldCFrame = worldCF,
+						RootRelCFrame = deserializeCFrame(pInfo.RootRelCFrame),
 						SizeX = sz[1] or 1,
 						SizeY = sz[2] or 1,
 						SizeZ = sz[3] or 1,
@@ -182,7 +156,6 @@ local function deserializeIncludedObjects(rawList)
 			end
 			table.insert(out, {
 				Name = entry.Name or "Accessory",
-				Distance = entry.Distance or 0,
 				Parts = partsDeserialized
 			})
 		end
@@ -257,101 +230,107 @@ local function loadPosesFromFile()
 end
 
 ----------------------------------------------------
--- 50-STUD ACCESSORY SCANNER & NON-TORSO FOLLOWER
+-- PLAYER ACCESSORY SCANNER & STATIC FORM SPAWNER
 ----------------------------------------------------
 
-local function scanNearbyAccessories(character, radius)
-	radius = radius or OBJECT_SCAN_RADIUS
-	local anchorPart = getPositionAnchorPart(character)
+local function isSpawnedPoseObject(instance)
+	for _, entry in ipairs(spawnedPoseObjects) do
+		if typeof(entry) == "Instance" and (instance == entry or instance:IsDescendantOf(entry)) then
+			return true
+		elseif type(entry) == "table" and typeof(entry.Model) == "Instance" and (instance == entry.Model or instance:IsDescendantOf(entry.Model)) then
+			return true
+		end
+	end
+	return false
+end
+
+local function scanAttachedPlayerAccessories(character)
+	if not character then return {} end
+	local anchorPart = getStaticAnchorPart(character)
 	if not anchorPart then return {} end
 
-	local anchorPos = anchorPart.Position
+	local anchorCF = anchorPart.CFrame
 	local collected = {}
 	local partCounter = 0
 
-	for _, desc in ipairs(workspace:GetDescendants()) do
-		if desc:IsA("Accessory") and not isPlayerCharacterDescendant(desc) then
-			local handle = desc:FindFirstChild("Handle") or desc:FindFirstChildWhichIsA("BasePart", true)
+	for _, child in ipairs(character:GetChildren()) do
+		if child:IsA("Accessory") and not isSpawnedPoseObject(child) then
+			local handle = child:FindFirstChild("Handle") or child:FindFirstChildWhichIsA("BasePart", true)
 			if handle and handle:IsA("BasePart") then
-				local dist = (handle.Position - anchorPos).Magnitude
-				if dist <= radius then
-					local partsMap = {}
-					local idx = 0
+				local partsMap = {}
+				local idx = 0
 
-					for _, child in ipairs(desc:GetDescendants()) do
-						if child:IsA("BasePart") then
-							idx = idx + 1
-							partCounter = partCounter + 1
-							local keyName = (child.Name ~= "" and not partsMap[child.Name]) and child.Name or (child.Name .. "_" .. tostring(partCounter) .. "_" .. tostring(idx))
+				for _, desc in ipairs(child:GetDescendants()) do
+					if desc:IsA("BasePart") then
+						idx = idx + 1
+						partCounter = partCounter + 1
+						local keyName = (desc.Name ~= "" and not partsMap[desc.Name]) and desc.Name or (desc.Name .. "_" .. tostring(partCounter) .. "_" .. tostring(idx))
 
-							local specialMesh = child:FindFirstChildWhichIsA("SpecialMesh")
-							local meshId = ""
-							local textureId = ""
-							local hasMeshScale = false
-							local meshScaleX, meshScaleY, meshScaleZ = 1, 1, 1
+						local specialMesh = desc:FindFirstChildWhichIsA("SpecialMesh")
+						local meshId = ""
+						local textureId = ""
+						local hasMeshScale = false
+						local meshScaleX, meshScaleY, meshScaleZ = 1, 1, 1
 
-							if specialMesh then
-								meshId = normalizeAssetId(specialMesh.MeshId)
-								textureId = normalizeAssetId(specialMesh.TextureId)
-								if specialMesh.Scale then
-									hasMeshScale = true
-									meshScaleX = specialMesh.Scale.X
-									meshScaleY = specialMesh.Scale.Y
-									meshScaleZ = specialMesh.Scale.Z
-								end
-							elseif child:IsA("MeshPart") then
-								meshId = normalizeAssetId(child.MeshId)
-								textureId = normalizeAssetId(child.TextureID)
+						if specialMesh then
+							meshId = normalizeAssetId(specialMesh.MeshId)
+							textureId = normalizeAssetId(specialMesh.TextureId)
+							if specialMesh.Scale then
+								hasMeshScale = true
+								meshScaleX = specialMesh.Scale.X
+								meshScaleY = specialMesh.Scale.Y
+								meshScaleZ = specialMesh.Scale.Z
 							end
-
-							local decalTextures = {}
-							for _, sub in ipairs(child:GetChildren()) do
-								if sub:IsA("Decal") or sub:IsA("Texture") then
-									table.insert(decalTextures, {
-										ClassName = sub.ClassName,
-										Name = sub.Name,
-										Texture = normalizeAssetId(sub.Texture),
-										Face = tostring(sub.Face),
-										Transparency = sub.Transparency
-									})
-								end
-							end
-
-							local cR, cG, cB = getPartColorRGB(child)
-							local matStr = string.gsub(tostring(child.Material), "^Enum%.Material%.", "")
-
-							partsMap[keyName] = {
-								Name = child.Name,
-								IsHandle = (child == handle),
-								RelOffset = child.Position - anchorPos,
-								WorldCFrame = child.CFrame,
-								SizeX = child.Size.X,
-								SizeY = child.Size.Y,
-								SizeZ = child.Size.Z,
-								HasMeshScale = hasMeshScale,
-								MeshScaleX = meshScaleX,
-								MeshScaleY = meshScaleY,
-								MeshScaleZ = meshScaleZ,
-								MeshId = meshId,
-								TextureId = textureId,
-								ColorR = cR,
-								ColorG = cG,
-								ColorB = cB,
-								Material = matStr,
-								Transparency = child.Transparency,
-								Reflectance = child.Reflectance,
-								DecalTextures = decalTextures
-							}
+						elseif desc:IsA("MeshPart") then
+							meshId = normalizeAssetId(desc.MeshId)
+							textureId = normalizeAssetId(desc.TextureID)
 						end
-					end
 
-					if next(partsMap) ~= nil then
-						table.insert(collected, {
+						local decalTextures = {}
+						for _, sub in ipairs(desc:GetChildren()) do
+							if sub:IsA("Decal") or sub:IsA("Texture") then
+								table.insert(decalTextures, {
+									ClassName = sub.ClassName,
+									Name = sub.Name,
+									Texture = normalizeAssetId(sub.Texture),
+									Face = tostring(sub.Face),
+									Transparency = sub.Transparency
+								})
+							end
+						end
+
+						local cR, cG, cB = getPartColorRGB(desc)
+						local matStr = string.gsub(tostring(desc.Material), "^Enum%.Material%.", "")
+
+						partsMap[keyName] = {
 							Name = desc.Name,
-							Distance = math.floor(dist * 100) / 100,
-							Parts = partsMap
-						})
+							IsHandle = (desc == handle),
+							RootRelCFrame = anchorCF:ToObjectSpace(desc.CFrame),
+							SizeX = desc.Size.X,
+							SizeY = desc.Size.Y,
+							SizeZ = desc.Size.Z,
+							HasMeshScale = hasMeshScale,
+							MeshScaleX = meshScaleX,
+							MeshScaleY = meshScaleY,
+							MeshScaleZ = meshScaleZ,
+							MeshId = meshId,
+							TextureId = textureId,
+							ColorR = cR,
+							ColorG = cG,
+							ColorB = cB,
+							Material = matStr,
+							Transparency = desc.Transparency,
+							Reflectance = desc.Reflectance,
+							DecalTextures = decalTextures
+						}
 					end
+				end
+
+				if next(partsMap) ~= nil then
+					table.insert(collected, {
+						Name = child.Name,
+						Parts = partsMap
+					})
 				end
 			end
 		end
@@ -375,30 +354,35 @@ local function clearSpawnedPoseObjects()
 	spawnedPoseObjects = {}
 end
 
+local function applyStaticPartForm(part, pInfo, anchorCF)
+	local partSize = Vector3.new(pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1)
+	part.Size = partSize
+	part.CFrame = anchorCF * (pInfo.RootRelCFrame or CFrame.identity)
+
+	local specialMesh = part:FindFirstChildWhichIsA("SpecialMesh")
+	if specialMesh and pInfo.HasMeshScale then
+		specialMesh.Scale = Vector3.new(pInfo.MeshScaleX or 1, pInfo.MeshScaleY or 1, pInfo.MeshScaleZ or 1)
+	end
+end
+
 local function spawnIncludedObjects(character, includedObjects)
 	clearSpawnedPoseObjects()
 	if type(includedObjects) ~= "table" or #includedObjects == 0 then return end
 
-	local anchorPart = getPositionAnchorPart(character)
-	local anchorPos = anchorPart and anchorPart.Position or Vector3.zero
+	local anchorPart = getStaticAnchorPart(character)
+	local anchorCF = anchorPart and anchorPart.CFrame or CFrame.identity
 	local trackedParts = {}
 
 	for _, objEntry in ipairs(includedObjects) do
 		local container = Instance.new("Model")
-		container.Name = "IncludedObj_" .. tostring(objEntry.Name or "Accessory")
+		container.Name = "StaticAcc_" .. tostring(objEntry.Name or "Accessory")
 
 		for _, pInfo in pairs(objEntry.Parts or {}) do
-			local relOffset = pInfo.RelOffset or Vector3.zero
-			local worldCF = pInfo.WorldCFrame or CFrame.identity
-			local rotationCF = worldCF.Rotation
-
 			local part = Instance.new("Part")
 			part.Name = pInfo.Name or "Part"
 			part.Anchored = true
 			part.CanCollide = false
 			part.Massless = true
-			part.Size = Vector3.new(pInfo.SizeX or 1, pInfo.SizeY or 1, pInfo.SizeZ or 1)
-			part.CFrame = CFrame.new(anchorPos + relOffset) * rotationCF
 			part.Transparency = pInfo.Transparency or 0
 			part.Reflectance = pInfo.Reflectance or 0
 
@@ -431,11 +415,11 @@ local function spawnIncludedObjects(character, includedObjects)
 				dec.Parent = part
 			end
 
+			applyStaticPartForm(part, pInfo, anchorCF)
 			part.Parent = container
 			table.insert(trackedParts, {
 				Part = part,
-				RelOffset = relOffset,
-				RotationCF = rotationCF
+				Info = pInfo
 			})
 		end
 
@@ -445,20 +429,20 @@ local function spawnIncludedObjects(character, includedObjects)
 		})
 	end
 
-	-- Follow character translation via non-rotating root/head anchor without inheriting Torso rotation
+	-- Keep extracted accessories attached while preserving exact static form during movement & Torso poses
 	activeObjectsFollowLoop = RunService.Stepped:Connect(function()
 		if not character or not character.Parent then
 			clearSpawnedPoseObjects()
 			return
 		end
-		local currentAnchor = getPositionAnchorPart(character)
+		local currentAnchor = getStaticAnchorPart(character)
 		if not currentAnchor then return end
-		local currentPos = currentAnchor.Position
+		local currentAnchorCF = currentAnchor.CFrame
 
 		for i = #trackedParts, 1, -1 do
 			local item = trackedParts[i]
 			if item.Part and item.Part.Parent then
-				item.Part.CFrame = CFrame.new(currentPos + item.RelOffset) * item.RotationCF
+				applyStaticPartForm(item.Part, item.Info, currentAnchorCF)
 			else
 				table.remove(trackedParts, i)
 			end
@@ -520,7 +504,7 @@ local function extractPoseData(character)
 		end
 	end
 
-	local capturedObjects = includeObjectsEnabled and scanNearbyAccessories(character, OBJECT_SCAN_RADIUS) or {}
+	local capturedObjects = includeObjectsEnabled and scanAttachedPlayerAccessories(character) or {}
 
 	return {
 		Joints = joints,
@@ -724,7 +708,7 @@ title.Parent = mainFrame
 
 makeDraggable(mainFrame, title)
 
--- Top Checkbox: Include objects (50 stud radius, non-player accessories)
+-- Top Checkbox: Include objects (player-attached accessories, static form)
 local includeObjectsBtn = Instance.new("TextButton")
 includeObjectsBtn.Name = "IncludeObjectsCheckbox"
 includeObjectsBtn.Size = UDim2.new(0.9, 0, 0, 26)
@@ -756,7 +740,7 @@ local includeObjectsLabel = Instance.new("TextLabel")
 includeObjectsLabel.Size = UDim2.new(1, -34, 1, 0)
 includeObjectsLabel.Position = UDim2.new(0, 30, 0, 0)
 includeObjectsLabel.BackgroundTransparency = 1
-includeObjectsLabel.Text = "Include objects (50st accessories)"
+includeObjectsLabel.Text = "Include objects (player accessories)"
 includeObjectsLabel.TextColor3 = Color3.fromRGB(225, 225, 235)
 includeObjectsLabel.TextXAlignment = Enum.TextXAlignment.Left
 includeObjectsLabel.Font = Enum.Font.SourceSansBold
@@ -1159,7 +1143,7 @@ function refreshList()
 				local poseNameLabel = Instance.new("TextLabel")
 				poseNameLabel.Size = UDim2.new(0.4, 0, 1, 0)
 				poseNameLabel.BackgroundTransparency = 1
-				poseNameLabel.Text = "   " .. poseName .. (objCount > 0 and (" [" .. objCount .. " obj]") or "")
+				poseNameLabel.Text = "   " .. poseName .. (objCount > 0 and (" [" .. objCount .. " acc]") or "")
 				poseNameLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
 				poseNameLabel.TextXAlignment = Enum.TextXAlignment.Left
 				poseNameLabel.Font = Enum.Font.SourceSans
@@ -1274,4 +1258,4 @@ end)
 -- Load existing saved poses on startup
 loadPosesFromFile()
 refreshList()
-print("xdm3wedidit9ak")
+print("xdm3wedidit9aYes, we didk")
