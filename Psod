@@ -3,6 +3,7 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
+local SoundService = game:GetService("SoundService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -18,10 +19,12 @@ local R6_LIMB_MAP = {
 
 -- Workspace Save Configuration
 local FOLDER_NAME = "R6PoseManager"
+local SOUNDS_FOLDER_NAME = FOLDER_NAME .. "/Sounds"
 local FILE_NAME = FOLDER_NAME .. "/SavedPoses.json"
 local QUALITY_VISUAL_PART_NAME = "R6QualityVisual"
+local SOUND_CONFIG_FILE = FOLDER_NAME .. "/SoundConfig.json"
 
--- Pose Database, Object Toggle, Animation State & Folder State
+-- Pose Database, Object Toggle, Animation State, Sound State & Folder State
 local SavedFolders = {
 	["Default"] = {}
 }
@@ -33,6 +36,9 @@ local animationDelaySeconds = 0.5
 local activeAnimationToken = 0
 local activeAnimationPlaying = false
 
+local SoundFolderAssets = {} -- { { Id = "...", Label = "...", SoundId = "..." } }
+local activeAnimSound = nil
+
 local activePoseLoop = nil
 local activeObjectsFollowLoop = nil
 local spawnedPoseObjects = {}
@@ -41,6 +47,184 @@ local currentLoadedPoseEntry = nil
 local extractedDuplicateCounter = 0
 
 local refreshList -- forward declaration
+
+----------------------------------------------------
+-- SOUND FOLDER & PLAYBACK HELPERS
+----------------------------------------------------
+
+local function normalizeSoundAssetId(val)
+	if not val then return "" end
+	local str = tostring(val):match("^%s*(.-)%s*$")
+	if str == "" then return "" end
+	if string.match(str, "^%d+$") then
+		return "rbxassetid://" .. str
+	end
+	return str
+end
+
+local function isSupportedAudioFileName(fileName)
+	local lower = tostring(fileName or ""):lower()
+	return lower:match("%.mp3$") ~= nil
+		or lower:match("%.ogg$") ~= nil
+		or lower:match("%.wav$") ~= nil
+		or lower:match("%.flac$") ~= nil
+		or lower:match("%.m4a$") ~= nil
+end
+
+local function getCustomAssetUrl(filePath)
+	if getcustomasset then
+		local ok, url = pcall(getcustomasset, filePath)
+		if ok and type(url) == "string" and url ~= "" then
+			return url
+		end
+	end
+	if getsynasset then
+		local ok, url = pcall(getsynasset, filePath)
+		if ok and type(url) == "string" and url ~= "" then
+			return url
+		end
+	end
+	return nil
+end
+
+local function saveSoundConfig()
+	if not writefile then return end
+	pcall(function()
+		if not isfolder(FOLDER_NAME) then
+			makefolder(FOLDER_NAME)
+		end
+		if not isfolder(SOUNDS_FOLDER_NAME) then
+			makefolder(SOUNDS_FOLDER_NAME)
+		end
+		local idsOnly = {}
+		for _, entry in ipairs(SoundFolderAssets) do
+			if entry.SourceType == "id" then
+				table.insert(idsOnly, entry.RawValue)
+			end
+		end
+		writefile(SOUND_CONFIG_FILE, HttpService:JSONEncode({
+			SoundIds = idsOnly
+		}))
+	end)
+end
+
+local function refreshSoundFolderAssets()
+	local savedIds = {}
+	if readfile and isfile and isfile(SOUND_CONFIG_FILE) then
+		pcall(function()
+			local parsed = HttpService:JSONDecode(readfile(SOUND_CONFIG_FILE))
+			if type(parsed) == "table" and type(parsed.SoundIds) == "table" then
+				savedIds = parsed.SoundIds
+			end
+		end)
+	end
+
+	pcall(function()
+		if isfolder and not isfolder(FOLDER_NAME) then
+			makefolder(FOLDER_NAME)
+		end
+		if isfolder and not isfolder(SOUNDS_FOLDER_NAME) then
+			makefolder(SOUNDS_FOLDER_NAME)
+		end
+	end)
+
+	local list = {}
+	local seenKeys = {}
+
+	if listfiles and isfolder and isfolder(SOUNDS_FOLDER_NAME) then
+		pcall(function()
+			for _, fullPath in ipairs(listfiles(SOUNDS_FOLDER_NAME)) do
+				local cleanPath = tostring(fullPath):gsub("\\", "/")
+				local fileName = cleanPath:match("([^/]+)$") or cleanPath
+				if isSupportedAudioFileName(fileName) then
+					local assetUrl = getCustomAssetUrl(cleanPath)
+					if assetUrl then
+						local key = "file:" .. cleanPath:lower()
+						if not seenKeys[key] then
+							seenKeys[key] = true
+							table.insert(list, {
+								Id = key,
+								Label = "[File] " .. fileName,
+								SoundId = assetUrl,
+								SourceType = "file",
+								RawValue = cleanPath
+							})
+						end
+					end
+				end
+			end
+		end)
+	end
+
+	for _, rawId in ipairs(savedIds) do
+		local normalized = normalizeSoundAssetId(rawId)
+		if normalized ~= "" then
+			local key = "id:" .. normalized:lower()
+			if not seenKeys[key] then
+				seenKeys[key] = true
+				table.insert(list, {
+					Id = key,
+					Label = "[ID] " .. tostring(rawId),
+					SoundId = normalized,
+					SourceType = "id",
+					RawValue = tostring(rawId)
+				})
+			end
+		end
+	end
+
+	table.sort(list, function(a, b)
+		return a.Label:lower() < b.Label:lower()
+	end)
+
+	SoundFolderAssets = list
+end
+
+local function stopAnimationSound()
+	if activeAnimSound then
+		pcall(function()
+			activeAnimSound:Stop()
+			activeAnimSound:Destroy()
+		end)
+		activeAnimSound = nil
+	end
+end
+
+local function playRandomPoseAnimationSound(poseEntry)
+	stopAnimationSound()
+	if type(poseEntry) ~= "table" or type(poseEntry.Sounds) ~= "table" or #poseEntry.Sounds == 0 then
+		return
+	end
+
+	local validSounds = {}
+	for _, sEntry in ipairs(poseEntry.Sounds) do
+		if type(sEntry) == "table" then
+			local sid = normalizeSoundAssetId(sEntry.SoundId or sEntry.RawValue)
+			if sid ~= "" then
+				table.insert(validSounds, sid)
+			end
+		elseif type(sEntry) == "string" then
+			local sid = normalizeSoundAssetId(sEntry)
+			if sid ~= "" then
+				table.insert(validSounds, sid)
+			end
+		end
+	end
+
+	if #validSounds == 0 then return end
+
+	local chosenSoundId = validSounds[math.random(1, #validSounds)]
+	local snd = Instance.new("Sound")
+	snd.Name = "R6PoseAnimSound"
+	snd.SoundId = chosenSoundId
+	snd.Volume = 1
+	snd.Parent = SoundService
+	activeAnimSound = snd
+
+	pcall(function()
+		snd:Play()
+	end)
+end
 
 ----------------------------------------------------
 -- FOLDER & SUBFOLDER PATH HELPERS
@@ -288,6 +472,68 @@ local function deserializeIncludedObjects(rawList)
 	return out
 end
 
+local function serializePoseSounds(soundsList)
+	local out = {}
+	if type(soundsList) ~= "table" then return out end
+	for _, sEntry in ipairs(soundsList) do
+		if type(sEntry) == "table" then
+			table.insert(out, {
+				Id = sEntry.Id or "",
+				Label = sEntry.Label or "",
+				SoundId = sEntry.SoundId or "",
+				SourceType = sEntry.SourceType or "id",
+				RawValue = sEntry.RawValue or sEntry.SoundId or ""
+			})
+		elseif type(sEntry) == "string" and sEntry ~= "" then
+			table.insert(out, {
+				Id = "id:" .. sEntry:lower(),
+				Label = sEntry,
+				SoundId = normalizeSoundAssetId(sEntry),
+				SourceType = "id",
+				RawValue = sEntry
+			})
+		end
+	end
+	return out
+end
+
+local function deserializePoseSounds(rawList)
+	local out = {}
+	if type(rawList) ~= "table" then return out end
+	for _, sEntry in ipairs(rawList) do
+		if type(sEntry) == "table" then
+			local rawVal = sEntry.RawValue or sEntry.SoundId or ""
+			local resolvedSoundId = sEntry.SoundId or ""
+			if sEntry.SourceType == "file" and rawVal ~= "" then
+				local fileUrl = getCustomAssetUrl(rawVal)
+				if fileUrl then
+					resolvedSoundId = fileUrl
+				end
+			elseif resolvedSoundId == "" and rawVal ~= "" then
+				resolvedSoundId = normalizeSoundAssetId(rawVal)
+			end
+			if resolvedSoundId ~= "" then
+				table.insert(out, {
+					Id = sEntry.Id or (tostring(sEntry.SourceType or "id") .. ":" .. tostring(rawVal):lower()),
+					Label = sEntry.Label or tostring(rawVal),
+					SoundId = resolvedSoundId,
+					SourceType = sEntry.SourceType or "id",
+					RawValue = tostring(rawVal)
+				})
+			end
+		elseif type(sEntry) == "string" and sEntry ~= "" then
+			table.insert(out, {
+				Id = "id:" .. sEntry:lower(),
+				Label = sEntry,
+				SoundId = normalizeSoundAssetId(sEntry),
+				SourceType = "id",
+				RawValue = sEntry
+			})
+		end
+	end
+	return out
+end
+
 local function savePosesToFile()
 	if not writefile then return end
 	
@@ -304,6 +550,7 @@ local function savePosesToFile()
 					Joints = {},
 					Exclusions = poseData.Exclusions or {},
 					IncludedObjects = serializeIncludedObjects(poseData.IncludedObjects or {}),
+					Sounds = serializePoseSounds(poseData.Sounds or {}),
 					AnimOrder = poseData.AnimOrder,
 					Trigger = {
 						Enabled = poseData.Trigger and poseData.Trigger.Enabled or false,
@@ -337,6 +584,7 @@ local function loadPosesFromFile()
 						Joints = {},
 						Exclusions = poseData.Exclusions or {},
 						IncludedObjects = deserializeIncludedObjects(poseData.IncludedObjects),
+						Sounds = deserializePoseSounds(poseData.Sounds),
 						AnimOrder = tonumber(poseData.AnimOrder),
 						Trigger = {
 							Enabled = false, 
@@ -346,7 +594,7 @@ local function loadPosesFromFile()
 					}
 					local rawJoints = poseData.Joints or poseData
 					for jointName, cfTbl in pairs(rawJoints) do
-						if jointName ~= "Exclusions" and jointName ~= "Trigger" and jointName ~= "IncludedObjects" and jointName ~= "AnimOrder" then
+						if jointName ~= "Exclusions" and jointName ~= "Trigger" and jointName ~= "IncludedObjects" and jointName ~= "AnimOrder" and jointName ~= "Sounds" then
 							SavedFolders[normFolder][poseName].Joints[jointName] = deserializeCFrame(cfTbl)
 						end
 					end
@@ -651,6 +899,7 @@ local function extractPoseData(character)
 		Joints = joints,
 		Exclusions = {},
 		IncludedObjects = capturedObjects,
+		Sounds = {},
 		AnimOrder = nil,
 		Trigger = { Enabled = false, MinHP = 0, MaxHP = 100 }
 	}
@@ -750,6 +999,7 @@ end
 local function stopAnimationSequence(resetPose)
 	activeAnimationToken = activeAnimationToken + 1
 	activeAnimationPlaying = false
+	stopAnimationSound()
 	if resetPose and LocalPlayer.Character then
 		unloadPose(LocalPlayer.Character)
 	end
@@ -793,6 +1043,7 @@ end
 
 local function startAnimationSequence()
 	stopAnimationSequence(false)
+	refreshSoundFolderAssets()
 	local steps, highestOrder = getOrderedPoseSteps()
 	if #steps == 0 or highestOrder < 1 then return end
 
@@ -818,6 +1069,7 @@ local function startAnimationSequence()
 				end
 
 				applyPoseData(char, step.PoseEntry, step.Identifier, true)
+				playRandomPoseAnimationSound(step.PoseEntry)
 				if refreshList then
 					refreshList()
 				end
@@ -836,6 +1088,7 @@ local function startAnimationSequence()
 
 		if activeAnimationToken == myToken then
 			activeAnimationPlaying = false
+			stopAnimationSound()
 			if LocalPlayer.Character then
 				unloadPose(LocalPlayer.Character)
 			end
@@ -1262,10 +1515,12 @@ animationBtn.MouseButton1Click:Connect(function()
 end)
 
 ----------------------------------------------------
--- SETTINGS & MOVE POSE POPUP MODAL
+-- SETTINGS, SOUNDS & MOVE POSE POPUP MODAL
 ----------------------------------------------------
 
 local function openPoseSettings(folderName, poseName, poseEntry)
+	refreshSoundFolderAssets()
+
 	local existingModal = mainFrame:FindFirstChild("SettingsModal")
 	if existingModal then existingModal:Destroy() end
 
@@ -1312,6 +1567,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	moveDesc.TextSize = 12
 	moveDesc.TextXAlignment = Enum.TextXAlignment.Left
 	moveDesc.ZIndex = 12
+	modalTitle.Parent = modalBox
 	moveDesc.Parent = modalBox
 
 	local moveRow = Instance.new("Frame")
@@ -1373,6 +1629,223 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 			end)
 		end
 	end
+
+	-- Section Sounds: Animation Sounds (Random if multiple selected)
+	local soundDesc = Instance.new("TextLabel")
+	soundDesc.Size = UDim2.new(1, 0, 0, 24)
+	soundDesc.BackgroundTransparency = 1
+	soundDesc.Text = "Animation Sounds (Random if multiple selected):"
+	soundDesc.TextColor3 = Color3.fromRGB(160, 235, 190)
+	soundDesc.Font = Enum.Font.SourceSansBold
+	soundDesc.TextSize = 12
+	soundDesc.TextXAlignment = Enum.TextXAlignment.Left
+	soundDesc.ZIndex = 12
+	soundDesc.Parent = modalBox
+
+	poseEntry.Sounds = poseEntry.Sounds or {}
+
+	local addSoundIdRow = Instance.new("Frame")
+	addSoundIdRow.Size = UDim2.new(1, 0, 0, 26)
+	addSoundIdRow.BackgroundTransparency = 1
+	addSoundIdRow.ZIndex = 13
+	addSoundIdRow.Parent = modalBox
+
+	local soundIdInput = Instance.new("TextBox")
+	soundIdInput.Size = UDim2.new(0.68, 0, 1, 0)
+	soundIdInput.Position = UDim2.new(0.02, 0, 0, 0)
+	soundIdInput.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+	soundIdInput.Text = ""
+	soundIdInput.PlaceholderText = "Sound ID (e.g. 123456789)"
+	soundIdInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+	soundIdInput.Font = Enum.Font.SourceSans
+	soundIdInput.TextSize = 12
+	soundIdInput.ZIndex = 14
+	soundIdInput.Parent = addSoundIdRow
+
+	local addSoundIdBtn = Instance.new("TextButton")
+	addSoundIdBtn.Size = UDim2.new(0.26, 0, 1, 0)
+	addSoundIdBtn.Position = UDim2.new(0.72, 0, 0, 0)
+	addSoundIdBtn.BackgroundColor3 = Color3.fromRGB(0, 145, 90)
+	addSoundIdBtn.Text = "+ Sound"
+	addSoundIdBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	addSoundIdBtn.Font = Enum.Font.SourceSansBold
+	addSoundIdBtn.TextSize = 12
+	addSoundIdBtn.ZIndex = 14
+	addSoundIdBtn.Parent = addSoundIdRow
+
+	local function isSoundSelectedOnPose(soundAsset)
+		for _, s in ipairs(poseEntry.Sounds) do
+			if type(s) == "table" then
+				if (soundAsset.Id ~= "" and s.Id == soundAsset.Id)
+					or (soundAsset.SoundId ~= "" and s.SoundId == soundAsset.SoundId)
+					or (soundAsset.RawValue ~= "" and s.RawValue == soundAsset.RawValue) then
+					return true
+				end
+			elseif type(s) == "string" then
+				if normalizeSoundAssetId(s) == soundAsset.SoundId then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	local function toggleSoundOnPose(soundAsset)
+		local foundIndex = nil
+		for i, s in ipairs(poseEntry.Sounds) do
+			if type(s) == "table" then
+				if (soundAsset.Id ~= "" and s.Id == soundAsset.Id)
+					or (soundAsset.SoundId ~= "" and s.SoundId == soundAsset.SoundId)
+					or (soundAsset.RawValue ~= "" and s.RawValue == soundAsset.RawValue) then
+					foundIndex = i
+					break
+				end
+			elseif type(s) == "string" then
+				if normalizeSoundAssetId(s) == soundAsset.SoundId then
+					foundIndex = i
+					break
+				end
+			end
+		end
+
+		if foundIndex then
+			table.remove(poseEntry.Sounds, foundIndex)
+		else
+			table.insert(poseEntry.Sounds, {
+				Id = soundAsset.Id,
+				Label = soundAsset.Label,
+				SoundId = soundAsset.SoundId,
+				SourceType = soundAsset.SourceType,
+				RawValue = soundAsset.RawValue
+			})
+		end
+		savePosesToFile()
+	end
+
+	local soundRowsContainer = Instance.new("Frame")
+	soundRowsContainer.Name = "SoundRowsContainer"
+	soundRowsContainer.Size = UDim2.new(1, 0, 0, 0)
+	soundRowsContainer.AutomaticSize = Enum.AutomaticSize.Y
+	soundRowsContainer.BackgroundTransparency = 1
+	soundRowsContainer.ZIndex = 12
+	soundRowsContainer.Parent = modalBox
+
+	local soundRowsLayout = Instance.new("UIListLayout")
+	soundRowsLayout.Parent = soundRowsContainer
+	soundRowsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	soundRowsLayout.Padding = UDim.new(0, 4)
+
+	local function rebuildSoundRows()
+		for _, child in ipairs(soundRowsContainer:GetChildren()) do
+			if not child:IsA("UIListLayout") then
+				child:Destroy()
+			end
+		end
+
+		if #SoundFolderAssets == 0 then
+			local emptySoundLbl = Instance.new("TextLabel")
+			emptySoundLbl.Size = UDim2.new(1, 0, 0, 22)
+			emptySoundLbl.BackgroundColor3 = Color3.fromRGB(36, 36, 44)
+			emptySoundLbl.Text = "  No audio in R6PoseManager/Sounds yet."
+			emptySoundLbl.TextColor3 = Color3.fromRGB(165, 165, 180)
+			emptySoundLbl.TextXAlignment = Enum.TextXAlignment.Left
+			emptySoundLbl.Font = Enum.Font.SourceSansItalic
+			emptySoundLbl.TextSize = 12
+			emptySoundLbl.ZIndex = 13
+			emptySoundLbl.Parent = soundRowsContainer
+		else
+			for _, sAsset in ipairs(SoundFolderAssets) do
+				local selected = isSoundSelectedOnPose(sAsset)
+				local sRow = Instance.new("TextButton")
+				sRow.Size = UDim2.new(1, 0, 0, 24)
+				sRow.BackgroundColor3 = selected and Color3.fromRGB(36, 56, 46) or Color3.fromRGB(40, 40, 50)
+				sRow.Text = ""
+				sRow.ZIndex = 13
+				sRow.Parent = soundRowsContainer
+
+				local sLabel = Instance.new("TextLabel")
+				sLabel.Size = UDim2.new(0.78, 0, 1, 0)
+				sLabel.Position = UDim2.new(0.04, 0, 0, 0)
+				sLabel.BackgroundTransparency = 1
+				sLabel.Text = sAsset.Label
+				sLabel.TextColor3 = Color3.fromRGB(225, 225, 235)
+				sLabel.TextXAlignment = Enum.TextXAlignment.Left
+				sLabel.TextTruncate = Enum.TextTruncate.AtEnd
+				sLabel.Font = Enum.Font.SourceSans
+				sLabel.TextSize = 12
+				sLabel.ZIndex = 14
+				sLabel.Parent = sRow
+
+				local sCheck = Instance.new("TextLabel")
+				sCheck.Size = UDim2.new(0, 18, 0, 18)
+				sCheck.Position = UDim2.new(0.85, 0, 0.12, 0)
+				sCheck.BackgroundColor3 = selected and Color3.fromRGB(0, 140, 75) or Color3.fromRGB(60, 60, 70)
+				sCheck.Text = selected and "✓" or ""
+				sCheck.TextColor3 = Color3.fromRGB(0, 255, 120)
+				sCheck.Font = Enum.Font.SourceSansBold
+				sCheck.TextSize = 13
+				sCheck.ZIndex = 14
+				sCheck.Parent = sRow
+
+				sRow.MouseButton1Click:Connect(function()
+					toggleSoundOnPose(sAsset)
+					rebuildSoundRows()
+				end)
+			end
+		end
+
+		modalBox.CanvasSize = UDim2.new(0, 0, 0, mLayout.AbsoluteContentSize.Y + 24)
+	end
+
+	addSoundIdBtn.MouseButton1Click:Connect(function()
+		local rawVal = tostring(soundIdInput.Text or ""):match("^%s*(.-)%s*$")
+		local normalized = normalizeSoundAssetId(rawVal)
+		if normalized == "" then return end
+
+		pcall(function()
+			if not isfolder(FOLDER_NAME) then makefolder(FOLDER_NAME) end
+			if not isfolder(SOUNDS_FOLDER_NAME) then makefolder(SOUNDS_FOLDER_NAME) end
+		end)
+
+		local existingIds = {}
+		if readfile and isfile and isfile(SOUND_CONFIG_FILE) then
+			pcall(function()
+				local parsed = HttpService:JSONDecode(readfile(SOUND_CONFIG_FILE))
+				if type(parsed) == "table" and type(parsed.SoundIds) == "table" then
+					existingIds = parsed.SoundIds
+				end
+			end)
+		end
+
+		local alreadyExists = false
+		for _, v in ipairs(existingIds) do
+			if normalizeSoundAssetId(v):lower() == normalized:lower() then
+				alreadyExists = true
+				break
+			end
+		end
+		if not alreadyExists then
+			table.insert(existingIds, rawVal)
+			if writefile then
+				pcall(function()
+					writefile(SOUND_CONFIG_FILE, HttpService:JSONEncode({ SoundIds = existingIds }))
+				end)
+			end
+		end
+
+		refreshSoundFolderAssets()
+		for _, sAsset in ipairs(SoundFolderAssets) do
+			if sAsset.SoundId == normalized and not isSoundSelectedOnPose(sAsset) then
+				toggleSoundOnPose(sAsset)
+				break
+			end
+		end
+
+		soundIdInput.Text = ""
+		rebuildSoundRows()
+	end)
+
+	rebuildSoundRows()
 
 	-- Section 1: Part Exclusions
 	local desc = Instance.new("TextLabel")
@@ -1602,7 +2075,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 		modal:Destroy()
 	end)
 
-	modalBox.CanvasSize = UDim2.new(0, 0, 0, mLayout.AbsoluteContentSize.Y + 20)
+	modalBox.CanvasSize = UDim2.new(0, 0, 0, mLayout.AbsoluteContentSize.Y + 24)
 end
 
 ----------------------------------------------------
@@ -1864,9 +2337,10 @@ saveBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
--- Load existing saved poses on startup and start with all folders closed
+-- Load existing saved poses & sound folder on startup and start with all folders closed
+refreshSoundFolderAssets()
 loadPosesFromFile()
 collapseAllFolders()
 updateAnimationLayout()
 refreshList()
-print("xdm3wedyesak")
+print("xdm3wedidit9ak")
