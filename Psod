@@ -979,7 +979,7 @@ saveBtn.Font = Enum.Font.SourceSansBold
 saveBtn.TextSize = 15
 saveBtn.Parent = inputFrame
 
--- Scrolling Frame (No bounce-back at bottom)
+-- Scrolling Frame (Infinite scroll without bounce-back)
 local scrollList = Instance.new("ScrollingFrame")
 scrollList.Size = UDim2.new(0.9, 0, 0, 275)
 scrollList.Position = UDim2.new(0.05, 0, 0, 188)
@@ -1002,13 +1002,36 @@ listLayout.Parent = scrollList
 listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 listLayout.Padding = UDim.new(0, 4)
 
-local function updateScrollListCanvasSize()
-	local totalHeight = listLayout.AbsoluteContentSize.Y + listPadding.PaddingTop.Offset + listPadding.PaddingBottom.Offset + 4
-	scrollList.CanvasSize = UDim2.new(0, 0, 0, math.max(totalHeight, scrollList.AbsoluteSize.Y))
+local extraInfiniteRunway = 1200
+
+local function updateScrollListCanvasSize(expandIfNearBottom)
+	local contentHeight = listLayout.AbsoluteContentSize.Y + listPadding.PaddingTop.Offset + listPadding.PaddingBottom.Offset + 4
+	local minHeight = math.max(contentHeight + extraInfiniteRunway, scrollList.AbsoluteSize.Y + extraInfiniteRunway)
+	local currentCanvasY = scrollList.CanvasSize.Y.Offset
+
+	if expandIfNearBottom then
+		local viewHeight = scrollList.AbsoluteSize.Y
+		local scrollY = scrollList.CanvasPosition.Y
+		if (scrollY + viewHeight) >= (currentCanvasY - 80) then
+			scrollList.CanvasSize = UDim2.new(0, 0, 0, currentCanvasY + 1200)
+			return
+		end
+	end
+
+	scrollList.CanvasSize = UDim2.new(0, 0, 0, math.max(currentCanvasY, minHeight))
 end
 
-listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateScrollListCanvasSize)
-scrollList:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateScrollListCanvasSize)
+listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	updateScrollListCanvasSize(false)
+end)
+
+scrollList:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+	updateScrollListCanvasSize(false)
+end)
+
+scrollList:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+	updateScrollListCanvasSize(true)
+end)
 
 local function updateAnimationLayout()
 	delayRow.Visible = animationModeEnabled
@@ -1023,7 +1046,7 @@ local function updateAnimationLayout()
 		scrollList.Position = UDim2.new(0.05, 0, 0, 188)
 		scrollList.Size = UDim2.new(0.9, 0, 0, 275)
 	end
-	updateScrollListCanvasSize()
+	updateScrollListCanvasSize(false)
 end
 
 animationBtn.MouseButton1Click:Connect(function()
@@ -1482,9 +1505,8 @@ refreshList = function()
 		end
 	end
 
-	updateScrollListCanvasSize()
-	local maxScrollY = math.max(0, scrollList.CanvasSize.Y.Offset - scrollList.AbsoluteSize.Y)
-	scrollList.CanvasPosition = Vector2.new(0, math.clamp(prevCanvasPos.Y, 0, maxScrollY))
+	updateScrollListCanvasSize(false)
+	scrollList.CanvasPosition = Vector2.new(0, math.max(0, prevCanvasPos.Y))
 end
 
 ----------------------------------------------------
@@ -1519,4 +1541,4 @@ end)
 loadPosesFromFile()
 updateAnimationLayout()
 refreshList()
-print("xdm3wediditHOLYYYY9ak")
+print("xdm3wedidit9ak")
