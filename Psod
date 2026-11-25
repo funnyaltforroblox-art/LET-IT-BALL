@@ -36,7 +36,7 @@ local animationDelaySeconds = 0.5
 local activeAnimationToken = 0
 local activeAnimationPlaying = false
 
-local SoundFolderAssets = {} -- { { Id = "...", Label = "...", SoundId = "..." } }
+local SoundFolderAssets = {}
 local activeAnimSound = nil
 
 local activePoseLoop = nil
@@ -85,27 +85,6 @@ local function getCustomAssetUrl(filePath)
 		end
 	end
 	return nil
-end
-
-local function saveSoundConfig()
-	if not writefile then return end
-	pcall(function()
-		if not isfolder(FOLDER_NAME) then
-			makefolder(FOLDER_NAME)
-		end
-		if not isfolder(SOUNDS_FOLDER_NAME) then
-			makefolder(SOUNDS_FOLDER_NAME)
-		end
-		local idsOnly = {}
-		for _, entry in ipairs(SoundFolderAssets) do
-			if entry.SourceType == "id" then
-				table.insert(idsOnly, entry.RawValue)
-			end
-		end
-		writefile(SOUND_CONFIG_FILE, HttpService:JSONEncode({
-			SoundIds = idsOnly
-		}))
-	end)
 end
 
 local function refreshSoundFolderAssets()
@@ -585,7 +564,7 @@ local function loadPosesFromFile()
 						Exclusions = poseData.Exclusions or {},
 						IncludedObjects = deserializeIncludedObjects(poseData.IncludedObjects),
 						Sounds = deserializePoseSounds(poseData.Sounds),
-						AnimOrder = tonumber(poseData.AnimOrder),
+						AnimOrder = nil, -- Clear animation orders on loadup
 						Trigger = {
 							Enabled = false, 
 							MinHP = savedTrigger.MinHP or 0,
@@ -1515,7 +1494,7 @@ animationBtn.MouseButton1Click:Connect(function()
 end)
 
 ----------------------------------------------------
--- SETTINGS, SOUNDS & MOVE POSE POPUP MODAL
+-- SETTINGS, DROPDOWNS & MOVE POSE POPUP MODAL
 ----------------------------------------------------
 
 local function openPoseSettings(folderName, poseName, poseEntry)
@@ -1523,6 +1502,9 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 
 	local existingModal = mainFrame:FindFirstChild("SettingsModal")
 	if existingModal then existingModal:Destroy() end
+
+	local moveDropdownOpen = false
+	local soundDropdownOpen = false
 
 	local modal = Instance.new("Frame")
 	modal.Name = "SettingsModal"
@@ -1547,6 +1529,10 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	mLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	mLayout.Padding = UDim.new(0, 8)
 
+	local function recalcModalCanvas()
+		modalBox.CanvasSize = UDim2.new(0, 0, 0, mLayout.AbsoluteContentSize.Y + 24)
+	end
+
 	local modalTitle = Instance.new("TextLabel")
 	modalTitle.Size = UDim2.new(1, 0, 0, 30)
 	modalTitle.BackgroundTransparency = 1
@@ -1557,9 +1543,9 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	modalTitle.ZIndex = 12
 	modalTitle.Parent = modalBox
 
-	-- Section 0: Move Pose to Folder / Subfolder
+	-- Section 0: Move Pose to Folder / Subfolder (Dropdown hidden by default)
 	local moveDesc = Instance.new("TextLabel")
-	moveDesc.Size = UDim2.new(1, 0, 0, 22)
+	moveDesc.Size = UDim2.new(1, 0, 0, 20)
 	moveDesc.BackgroundTransparency = 1
 	moveDesc.Text = "Move Pose to Folder / Subfolder:"
 	moveDesc.TextColor3 = Color3.fromRGB(255, 215, 90)
@@ -1567,7 +1553,6 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	moveDesc.TextSize = 12
 	moveDesc.TextXAlignment = Enum.TextXAlignment.Left
 	moveDesc.ZIndex = 12
-	modalTitle.Parent = modalBox
 	moveDesc.Parent = modalBox
 
 	local moveRow = Instance.new("Frame")
@@ -1577,7 +1562,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	moveRow.Parent = modalBox
 
 	local moveTargetBox = Instance.new("TextBox")
-	moveTargetBox.Size = UDim2.new(0.68, 0, 1, 0)
+	moveTargetBox.Size = UDim2.new(0.46, 0, 1, 0)
 	moveTargetBox.Position = UDim2.new(0.02, 0, 0, 0)
 	moveTargetBox.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
 	moveTargetBox.Text = folderName
@@ -1588,9 +1573,20 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	moveTargetBox.ZIndex = 14
 	moveTargetBox.Parent = moveRow
 
+	local moveDropdownToggle = Instance.new("TextButton")
+	moveDropdownToggle.Size = UDim2.new(0.24, 0, 1, 0)
+	moveDropdownToggle.Position = UDim2.new(0.50, 0, 0, 0)
+	moveDropdownToggle.BackgroundColor3 = Color3.fromRGB(55, 62, 82)
+	moveDropdownToggle.Text = "Folders ▼"
+	moveDropdownToggle.TextColor3 = Color3.fromRGB(215, 230, 255)
+	moveDropdownToggle.Font = Enum.Font.SourceSansBold
+	moveDropdownToggle.TextSize = 11
+	moveDropdownToggle.ZIndex = 14
+	moveDropdownToggle.Parent = moveRow
+
 	local moveConfirmBtn = Instance.new("TextButton")
-	moveConfirmBtn.Size = UDim2.new(0.26, 0, 1, 0)
-	moveConfirmBtn.Position = UDim2.new(0.72, 0, 0, 0)
+	moveConfirmBtn.Size = UDim2.new(0.22, 0, 1, 0)
+	moveConfirmBtn.Position = UDim2.new(0.76, 0, 0, 0)
 	moveConfirmBtn.BackgroundColor3 = Color3.fromRGB(0, 135, 195)
 	moveConfirmBtn.Text = "Move"
 	moveConfirmBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -1598,6 +1594,51 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	moveConfirmBtn.TextSize = 12
 	moveConfirmBtn.ZIndex = 14
 	moveConfirmBtn.Parent = moveRow
+
+	local moveDropdownList = Instance.new("Frame")
+	moveDropdownList.Name = "MoveDropdownList"
+	moveDropdownList.Size = UDim2.new(1, 0, 0, 0)
+	moveDropdownList.AutomaticSize = Enum.AutomaticSize.Y
+	moveDropdownList.BackgroundTransparency = 1
+	moveDropdownList.Visible = false
+	moveDropdownList.ZIndex = 13
+	moveDropdownList.Parent = modalBox
+
+	local moveDropdownLayout = Instance.new("UIListLayout")
+	moveDropdownLayout.Parent = moveDropdownList
+	moveDropdownLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	moveDropdownLayout.Padding = UDim.new(0, 3)
+
+	for _, existingPath in ipairs(getSortedFolderPaths()) do
+		if existingPath ~= folderName then
+			local quickFolderBtn = Instance.new("TextButton")
+			quickFolderBtn.Size = UDim2.new(0.96, 0, 0, 22)
+			quickFolderBtn.Position = UDim2.new(0.02, 0, 0, 0)
+			quickFolderBtn.BackgroundColor3 = Color3.fromRGB(38, 42, 54)
+			quickFolderBtn.Text = "  ↳ " .. existingPath
+			quickFolderBtn.TextColor3 = Color3.fromRGB(200, 225, 255)
+			quickFolderBtn.TextXAlignment = Enum.TextXAlignment.Left
+			quickFolderBtn.Font = Enum.Font.SourceSans
+			quickFolderBtn.TextSize = 12
+			quickFolderBtn.ZIndex = 14
+			quickFolderBtn.Parent = moveDropdownList
+
+			quickFolderBtn.MouseButton1Click:Connect(function()
+				moveTargetBox.Text = existingPath
+				moveDropdownOpen = false
+				moveDropdownList.Visible = false
+				moveDropdownToggle.Text = "Folders ▼"
+				recalcModalCanvas()
+			end)
+		end
+	end
+
+	moveDropdownToggle.MouseButton1Click:Connect(function()
+		moveDropdownOpen = not moveDropdownOpen
+		moveDropdownList.Visible = moveDropdownOpen
+		moveDropdownToggle.Text = moveDropdownOpen and "Folders ▲" or "Folders ▼"
+		recalcModalCanvas()
+	end)
 
 	moveConfirmBtn.MouseButton1Click:Connect(function()
 		local destination = moveTargetBox.Text
@@ -1608,31 +1649,9 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 		end
 	end)
 
-	-- Quick-Pick Existing Folders & Subfolders
-	for _, existingPath in ipairs(getSortedFolderPaths()) do
-		if existingPath ~= folderName then
-			local quickFolderBtn = Instance.new("TextButton")
-			quickFolderBtn.Size = UDim2.new(0.96, 0, 0, 22)
-			quickFolderBtn.BackgroundColor3 = Color3.fromRGB(38, 42, 54)
-			quickFolderBtn.Text = "  ↳ Move to: " .. existingPath
-			quickFolderBtn.TextColor3 = Color3.fromRGB(200, 225, 255)
-			quickFolderBtn.TextXAlignment = Enum.TextXAlignment.Left
-			quickFolderBtn.Font = Enum.Font.SourceSans
-			quickFolderBtn.TextSize = 12
-			quickFolderBtn.ZIndex = 14
-			quickFolderBtn.Parent = modalBox
-
-			quickFolderBtn.MouseButton1Click:Connect(function()
-				if movePoseToFolder(folderName, poseName, existingPath) then
-					modal:Destroy()
-				end
-			end)
-		end
-	end
-
-	-- Section Sounds: Animation Sounds (Random if multiple selected)
+	-- Section Sounds: Sound Library Dropdown (Hidden on launch)
 	local soundDesc = Instance.new("TextLabel")
-	soundDesc.Size = UDim2.new(1, 0, 0, 24)
+	soundDesc.Size = UDim2.new(1, 0, 0, 20)
 	soundDesc.BackgroundTransparency = 1
 	soundDesc.Text = "Animation Sounds (Random if multiple selected):"
 	soundDesc.TextColor3 = Color3.fromRGB(160, 235, 190)
@@ -1644,11 +1663,43 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 
 	poseEntry.Sounds = poseEntry.Sounds or {}
 
+	local soundLibraryToggleRow = Instance.new("Frame")
+	soundLibraryToggleRow.Size = UDim2.new(1, 0, 0, 26)
+	soundLibraryToggleRow.BackgroundTransparency = 1
+	soundLibraryToggleRow.ZIndex = 13
+	soundLibraryToggleRow.Parent = modalBox
+
+	local soundLibraryBtn = Instance.new("TextButton")
+	soundLibraryBtn.Size = UDim2.new(0.96, 0, 1, 0)
+	soundLibraryBtn.Position = UDim2.new(0.02, 0, 0, 0)
+	soundLibraryBtn.BackgroundColor3 = Color3.fromRGB(38, 56, 48)
+	soundLibraryBtn.Text = "Sound Library ▼ (" .. tostring(#poseEntry.Sounds) .. " selected)"
+	soundLibraryBtn.TextColor3 = Color3.fromRGB(190, 245, 210)
+	soundLibraryBtn.TextXAlignment = Enum.TextXAlignment.Left
+	soundLibraryBtn.Font = Enum.Font.SourceSansBold
+	soundLibraryBtn.TextSize = 12
+	soundLibraryBtn.ZIndex = 14
+	soundLibraryBtn.Parent = soundLibraryToggleRow
+
+	local soundDropdownPanel = Instance.new("Frame")
+	soundDropdownPanel.Name = "SoundLibraryDropdown"
+	soundDropdownPanel.Size = UDim2.new(1, 0, 0, 0)
+	soundDropdownPanel.AutomaticSize = Enum.AutomaticSize.Y
+	soundDropdownPanel.BackgroundTransparency = 1
+	soundDropdownPanel.Visible = false
+	soundDropdownPanel.ZIndex = 13
+	soundDropdownPanel.Parent = modalBox
+
+	local soundPanelLayout = Instance.new("UIListLayout")
+	soundPanelLayout.Parent = soundDropdownPanel
+	soundPanelLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	soundPanelLayout.Padding = UDim.new(0, 4)
+
 	local addSoundIdRow = Instance.new("Frame")
 	addSoundIdRow.Size = UDim2.new(1, 0, 0, 26)
 	addSoundIdRow.BackgroundTransparency = 1
 	addSoundIdRow.ZIndex = 13
-	addSoundIdRow.Parent = modalBox
+	addSoundIdRow.Parent = soundDropdownPanel
 
 	local soundIdInput = Instance.new("TextBox")
 	soundIdInput.Size = UDim2.new(0.68, 0, 1, 0)
@@ -1719,6 +1770,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 				RawValue = soundAsset.RawValue
 			})
 		end
+		soundLibraryBtn.Text = (soundDropdownOpen and "Sound Library ▲ (" or "Sound Library ▼ (") .. tostring(#poseEntry.Sounds) .. " selected)"
 		savePosesToFile()
 	end
 
@@ -1728,7 +1780,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 	soundRowsContainer.AutomaticSize = Enum.AutomaticSize.Y
 	soundRowsContainer.BackgroundTransparency = 1
 	soundRowsContainer.ZIndex = 12
-	soundRowsContainer.Parent = modalBox
+	soundRowsContainer.Parent = soundDropdownPanel
 
 	local soundRowsLayout = Instance.new("UIListLayout")
 	soundRowsLayout.Parent = soundRowsContainer
@@ -1794,8 +1846,15 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 			end
 		end
 
-		modalBox.CanvasSize = UDim2.new(0, 0, 0, mLayout.AbsoluteContentSize.Y + 24)
+		recalcModalCanvas()
 	end
+
+	soundLibraryBtn.MouseButton1Click:Connect(function()
+		soundDropdownOpen = not soundDropdownOpen
+		soundDropdownPanel.Visible = soundDropdownOpen
+		soundLibraryBtn.Text = (soundDropdownOpen and "Sound Library ▲ (" or "Sound Library ▼ (") .. tostring(#poseEntry.Sounds) .. " selected)"
+		recalcModalCanvas()
+	end)
 
 	addSoundIdBtn.MouseButton1Click:Connect(function()
 		local rawVal = tostring(soundIdInput.Text or ""):match("^%s*(.-)%s*$")
@@ -2075,7 +2134,7 @@ local function openPoseSettings(folderName, poseName, poseEntry)
 		modal:Destroy()
 	end)
 
-	modalBox.CanvasSize = UDim2.new(0, 0, 0, mLayout.AbsoluteContentSize.Y + 24)
+	recalcModalCanvas()
 end
 
 ----------------------------------------------------
